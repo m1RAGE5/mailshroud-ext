@@ -33,52 +33,49 @@ export default defineBackground(() => {
 });
 
 function setupMessageHandlers() {
-  // Слухаємо всі типи повідомлень з протоколу
-  const messageTypes: Extract<keyof MailShroudMessages, string>[] = [
-    "decryptMessage",
-    "encryptMessage",
-    "unlockVault",
-    "lockVault",
-    "storePrivateKey",
-    "getPublicKey",
-    "storePublicKey",
-    "isVaultUnlocked",
-  ];
+  // Реєструємо кожен тип повідомлення окремо для type-safety
+  messenger.onMessage("decryptMessage", async (message) => {
+    return await handleDecryptMessage(message.data);
+  });
 
-  for (const type of messageTypes) {
-    messenger.onMessage(type, async (message) => {
-      console.log("Received message:", type);
-      switch (type) {
-        case "decryptMessage":
-          return await handleDecryptMessage(message.data);
-        case "encryptMessage": {
-          const [text, recipientEmails] = message.data;
-          return await handleEncryptMessage(text, recipientEmails);
-        }
-        case "unlockVault":
-          return await handleUnlockVault(message.data);
-        case "lockVault":
-          await handleLockVault();
-          return undefined;
-        case "storePrivateKey": {
-          const [email, encryptedArmoredKey, salt, iv] = message.data;
-          await handleStorePrivateKey(email, encryptedArmoredKey, salt, iv);
-          return undefined;
-        }
-        case "getPublicKey":
-          return await handleGetPublicKey(message.data);
-        case "storePublicKey": {
-          const [email, armoredKey] = message.data;
-          await handleStorePublicKey(email, armoredKey);
-          return undefined;
-        }
-        case "isVaultUnlocked":
-          return await handleIsVaultUnlocked();
-        default:
-          throw new Error(`Unknown message: ${type}`);
-      }
-    });
-  }
+  messenger.onMessage("encryptMessage", async (message) => {
+    const [text, recipientEmails] = message.data as [string, string[]];
+    return await handleEncryptMessage(text, recipientEmails);
+  });
+
+  messenger.onMessage("unlockVault", async (message) => {
+    return await handleUnlockVault(message.data as string);
+  });
+
+  messenger.onMessage("lockVault", async () => {
+    await handleLockVault();
+    return undefined as never;
+  });
+
+  messenger.onMessage("storePrivateKey", async (message) => {
+    const [email, encryptedArmoredKey, salt, iv] = message.data as [
+      string,
+      string,
+      string,
+      string,
+    ];
+    await handleStorePrivateKey(email, encryptedArmoredKey, salt, iv);
+    return undefined as never;
+  });
+
+  messenger.onMessage("getPublicKey", async (message) => {
+    return await handleGetPublicKey(message.data as string);
+  });
+
+  messenger.onMessage("storePublicKey", async (message) => {
+    const [email, armoredKey] = message.data as [string, string];
+    await handleStorePublicKey(email, armoredKey);
+    return undefined as never;
+  });
+
+  messenger.onMessage("isVaultUnlocked", async () => {
+    return await handleIsVaultUnlocked();
+  });
 }
 
 /**

@@ -17,9 +17,6 @@ export interface UnlockedKeyData {
 
 export const sessionState = storage.defineItem<Record<string, UnlockedKeyData>>(
   "session:unlockedKeys",
-  {
-    storageArea: "session",
-  },
 );
 
 /**
