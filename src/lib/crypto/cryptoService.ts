@@ -92,19 +92,6 @@ export async function validatePublicKey(
         );
     }
 
-    const primaryKeyAlgo = key.keyPacket.algorithm;
-    const allowedAlgorithms = [
-        openpgp.enums.publicKey.ed25519,
-        openpgp.enums.publicKey.x25519,
-    ];
-
-    if (!allowedAlgorithms.includes(primaryKeyAlgo)) {
-        throw new Error(
-            `Unsupported primary key algorithm. Got: ${primaryKeyAlgo}. ` +
-                `Only Ed25519/X25519 (v6) or EdDSA/ECDH (v4) are allowed.`,
-        );
-    }
-
     const encryptionKey = await key.getEncryptionKey();
     if (!encryptionKey) {
         throw new Error("No valid encryption subkey found");
@@ -253,12 +240,11 @@ export function getEmailFromKey(key: openpgp.Key): string | undefined {
  * Конвертує Uint8Array у Base64 строку безпечно.
  */
 function bufferToBase64(buffer: Uint8Array): string {
-    const chunks: string[] = [];
-    const CHUNK_SIZE = 0x8000;
-    for (let i = 0; i < buffer.length; i += CHUNK_SIZE) {
-        chunks.push(String.fromCharCode(...buffer.subarray(i, i + CHUNK_SIZE)));
+    let binary = "";
+    for (let i = 0; i < buffer.length; i++) {
+        binary += String.fromCharCode(buffer[i]);
     }
-    return btoa(chunks.join(""));
+    return btoa(binary);
 }
 
 /**

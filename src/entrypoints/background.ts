@@ -35,11 +35,7 @@ import {
     getState,
 } from "~/lib/security/rateLimit";
 import { startKeepAlive, stopKeepAlive } from "~/lib/security/vaultKeepAlive";
-import {
-    VaultError,
-    VaultErrorCode,
-    VaultLockTimeoutError,
-} from "~/lib/types/error";
+import { VaultError, VaultErrorCode } from "~/lib/types/error";
 
 const messenger = defineExtensionMessaging<MailShroudMessages>();
 
@@ -137,6 +133,21 @@ function setupLifecycleHandlers() {
     });
 }
 
+function findKeyByKeyIdInSnapshot(
+    keyId: openpgp.KeyID,
+    snapshot: Map<string, openpgp.PrivateKey>,
+): openpgp.PrivateKey | undefined {
+    const keyIdHex = keyId.toHex();
+    for (const key of snapshot.values()) {
+        const allKeyIds = [
+            key.getKeyID().toHex(),
+            ...key.getSubkeys().map((sk) => sk.getKeyID().toHex()),
+        ];
+        if (allKeyIds.includes(keyIdHex)) return key;
+    }
+    return undefined;
+}
+
 /**
  * Розшифрування PGP повідомлення.
  */
@@ -147,9 +158,14 @@ async function handleDecryptMessage(armoredText: string): Promise<{
 }> {
     try {
         if (!isVaultActuallyUnlocked()) {
+            throw new VaultError(VaultErrorCode.LOCKED, "Vault is locked.");
+        }
+
+        const keySnapshot = getAllCachedKeys();
+        if (keySnapshot.size === 0) {
             throw new VaultError(
                 VaultErrorCode.LOCKED,
-                "Vault is locked. Please unlock first.",
+                "Vault was locked during operation.",
             );
         }
 
@@ -169,21 +185,14 @@ async function handleDecryptMessage(armoredText: string): Promise<{
 
         const decryptionKeys: openpgp.PrivateKey[] = [];
         for (const keyId of encryptionKeyIds) {
-            const key = findKeyByKeyId(keyId);
-            if (key) {
-                decryptionKeys.push(key);
-            }
+            const key = findKeyByKeyIdInSnapshot(keyId, keySnapshot);
+            if (key) decryptionKeys.push(key);
         }
 
         if (decryptionKeys.length === 0) {
-            const unlocked = isVaultActuallyUnlocked();
             throw new VaultError(
-                unlocked
-                    ? VaultErrorCode.NO_MATCHING_KEY
-                    : VaultErrorCode.LOCKED,
-                unlocked
-                    ? "You don't have a private key that can decrypt this message"
-                    : "Vault is locked. Please unlock first.",
+                VaultErrorCode.NO_MATCHING_KEY,
+                "You don't have a private key that can decrypt this message",
             );
         }
 
@@ -198,27 +207,35 @@ async function handleDecryptMessage(armoredText: string): Promise<{
             message,
             decryptionKeys,
             verificationKeys,
+            expectSigned: false,
         });
 
         const signaturesValid: boolean[] = [];
         const signerEmails: (string | null)[] = [];
 
-        for (const sig of signatures) {
-            try {
-                await sig.verified;
-                signaturesValid.push(true);
-                const keyIdHex = sig.keyID.toHex();
-                const signerKey = verificationKeys.find((k) => {
-                    const allKeyIds = [
-                        k.getKeyID().toHex(),
-                        ...k.subkeys.map((sk) => sk.getKeyID().toHex()),
-                    ];
-                    return allKeyIds.includes(keyIdHex);
-                });
-                signerEmails.push(signerKey?.users[0]?.userID?.email ?? null);
-            } catch {
-                signaturesValid.push(false);
-                signerEmails.push(null);
+        if (signatures.length === 0) {
+            signaturesValid.push(false);
+            signerEmails.push(null);
+        } else {
+            for (const sig of signatures) {
+                try {
+                    await sig.verified;
+                    signaturesValid.push(true);
+                    const keyIdHex = sig.keyID.toHex();
+                    const signerKey = verificationKeys.find((k) => {
+                        const allKeyIds = [
+                            k.getKeyID().toHex(),
+                            ...k.subkeys.map((sk) => sk.getKeyID().toHex()),
+                        ];
+                        return allKeyIds.includes(keyIdHex);
+                    });
+                    signerEmails.push(
+                        signerKey?.users[0]?.userID?.email ?? null,
+                    );
+                } catch {
+                    signaturesValid.push(false);
+                    signerEmails.push(null);
+                }
             }
         }
 
@@ -311,9 +328,9 @@ async function handleEncryptMessage(
 
         if (signingKey) {
             signingKeys.push(signingKey);
-        } else if (import.meta.env.DEV) {
+        } else {
             console.warn(
-                "No unlocked private key available — message will NOT be signed",
+                "[MailShroud] No unlocked private key available — message will NOT be signed",
             );
         }
 
@@ -327,7 +344,6 @@ async function handleEncryptMessage(
             refreshAutoLock();
         }
 
-        refreshAutoLock();
         return {
             encrypted: encrypted as string,
             signed: signingKeys.length > 0,
@@ -361,10 +377,6 @@ async function handleUnlockVault(
         } catch (err) {
             if (err instanceof VaultLockedError) {
                 lockedEmails.push(keyRecord.email);
-            } else if (err instanceof VaultLockTimeoutError) {
-                console.error(
-                    "[MailShroud] Lock timeout, proceeding with caution",
-                );
             } else {
                 throw err;
             }

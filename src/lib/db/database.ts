@@ -47,8 +47,8 @@ export class MailShroudDB extends Dexie {
         super("MailShroudDB");
 
         this.version(1).stores({
-            privateKeys: "&email, keyFingerprint",
-            publicKeys: "&email, keyFingerprint",
+            privateKeys: "&email",
+            publicKeys: "&email",
             settings: "&key",
         });
 
@@ -56,8 +56,15 @@ export class MailShroudDB extends Dexie {
             if (!obj.email?.includes("@")) {
                 throw new Error("Invalid email format");
             }
-            if (!obj.keyFingerprint || obj.keyFingerprint.length !== 40) {
-                throw new Error("Invalid key fingerprint");
+            if (
+                !obj.keyFingerprint ||
+                (obj.keyFingerprint.length !== 64 &&
+                    obj.keyFingerprint.length !== 40)
+            ) {
+                throw new Error(
+                    `Invalid key fingerprint length: ${obj.keyFingerprint?.length}. ` +
+                        `Expected 64 (v6) or 40 (v4) hex characters.`,
+                );
             }
             if (!/^[A-Za-z0-9+/=]+$/.test(obj.encryptedArmoredKey)) {
                 throw new Error("Invalid encrypted key format");

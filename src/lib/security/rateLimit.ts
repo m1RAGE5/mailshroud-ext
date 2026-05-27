@@ -60,13 +60,10 @@ const LOCK_TIMEOUT_MS = 5_000;
 function withLock<T>(fn: () => Promise<T>): Promise<T> {
     const next = stateLock.then(fn, fn);
     const timeoutPromise = new Promise<never>((_, reject) => {
-        const timer = setTimeout(
+        setTimeout(
             () => reject(new VaultLockTimeoutError(LOCK_TIMEOUT_MS)),
             LOCK_TIMEOUT_MS,
         );
-        if (typeof timer === "object" && "unref" in timer) {
-            (timer as NodeJS.Timeout).unref();
-        }
     });
 
     stateLock = Promise.race([next, timeoutPromise]).then(

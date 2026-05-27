@@ -100,19 +100,12 @@ export function sanitizeDecryptedHtml(rawHtml: string): string {
         link.setAttribute("rel", Array.from(relValues).join(" "));
     });
 
-    doc.querySelectorAll("[style]").forEach((el) => {
-        el.removeAttribute("style");
-    });
-
     return doc.body.innerHTML;
 }
 
-/**
- * Для plain text (без HTML) — екрануємо, щоб уникнути injection
- */
 export function sanitizePlainText(text: string): string {
     return DOMPurify.sanitize(text, {
-        ALLOWED_TAGS: [],
+        ALLOWED_TAGS: ["#text"],
         ALLOWED_ATTR: [],
     });
 }
