@@ -1,27 +1,83 @@
 import type { Message } from "@webext-core/messaging";
 
 /**
- * Протокол повідомлень між Content Script та Background
- * Ключі - це типи повідомлень, значення - тип даних (data payload)
- * Для методів з return value використовується функціональний синтаксис
+ * Результат розблокування vault
  */
-export interface MailShroudMessages {
-  decryptMessage: (armoredText: string) => string;
-  encryptMessage: (text: string, recipientEmails: string[]) => string;
-  unlockVault: (masterPassword: string) => boolean;
-  lockVault: () => void;
-  storePrivateKey: (
-    email: string,
-    encryptedArmoredKey: string,
-    salt: string,
-    iv: string,
-  ) => void;
-  getPublicKey: (email: string) => string | null;
-  storePublicKey: (email: string, armoredKey: string) => void;
-  isVaultUnlocked: () => boolean;
+export interface UnlockResult {
+    success: boolean;
+    unlocked: number;
+    failed: number;
+    failedEmails: string[];
 }
 
 /**
- * Alias для сумісності (якщо використовується в інших місцях)
+ * Параметри для збереження приватного ключа
  */
+export interface StorePrivateKeyParams {
+    email: string;
+    encryptedArmoredKey: string;
+    salt: string;
+    iv: string;
+    masterPassword: string;
+    forceOverwrite?: boolean;
+}
+
+/**
+ * Результат збереження приватного ключа.
+ * Повертається з background після успішної валідації.
+ */
+export interface StorePrivateKeyResult {
+    fingerprint: string;
+    email: string;
+}
+
+/**
+ * Параметри для шифрування повідомлення
+ */
+export interface EncryptMessageParams {
+    text: string;
+    recipientEmails: string[];
+    senderEmail?: string;
+}
+
+export interface DecryptMessageResult {
+    data: string;
+    signaturesValid: boolean[];
+    signerEmails: (string | null)[];
+}
+
+/**
+Результат шифрування повідомлення
+*/
+export interface EncryptMessageResult {
+    encrypted: string;
+    signed: boolean;
+    signerEmail?: string;
+}
+
+/**
+ * Протокол повідомлень між Content Script та Background
+ * Усі методи з кількома параметрами використовують об'єкт для type-safety
+ */
+export interface MailShroudMessages {
+    storePrivateKey: (
+        params: StorePrivateKeyParams,
+    ) => Promise<StorePrivateKeyResult>;
+
+    getPublicKey: (email: string) => Promise<string | null>;
+    storePublicKey: (params: {
+        email: string;
+        armoredKey: string;
+    }) => Promise<void>;
+
+    unlockVault: (masterPassword: string) => Promise<UnlockResult>;
+    lockVault: () => Promise<void>;
+    isVaultUnlocked: () => Promise<boolean>;
+
+    decryptMessage: (armoredText: string) => Promise<DecryptMessageResult>;
+    encryptMessage: (
+        params: EncryptMessageParams,
+    ) => Promise<EncryptMessageResult>;
+}
+
 export type MailShroudProtocol = MailShroudMessages;

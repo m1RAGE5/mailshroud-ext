@@ -1,69 +1,72 @@
-import { storage } from "#imports";
+import * as openpgp from "openpgp";
 
 /**
- * Session state для зберігання розблокованих приватних ключів.
- * Використовує chrome.storage.session, який очищується при закритті браузера.
+ * In-memory сховище розблокованих приватних ключів.
+ * Живе тільки поки Service Worker активний.
+ * При termination SW — автоматично очищується (природній auto-lock).
  *
- * Структура:
- * {
- *   email1: { armoredKey: string, timestamp: number },
- *   email2: { armoredKey: string, timestamp: number }
- * }
+ * Ключі Map — завжди email у нижньому регістрі.
  */
-export interface UnlockedKeyData {
-  armoredKey: string;
-  timestamp: number;
+const unlockedKeys = new Map<string, openpgp.PrivateKey>();
+
+export function cacheUnlockedKey(
+    email: string,
+    privateKey: openpgp.PrivateKey,
+): void {
+    unlockedKeys.set(email.toLowerCase(), privateKey);
 }
 
-export const sessionState = storage.defineItem<Record<string, UnlockedKeyData>>(
-  "session:unlockedKeys",
-);
+export function getCachedUnlockedKey(
+    email: string,
+): openpgp.PrivateKey | undefined {
+    return unlockedKeys.get(email.toLowerCase());
+}
 
-/**
- * Зберегти розблокований ключ у session storage
- */
-export async function cacheUnlockedKey(
-  email: string,
-  armoredKey: string,
-): Promise<void> {
-  const current = (await sessionState.getValue()) || {};
-  current[email] = {
-    armoredKey,
-    timestamp: Date.now(),
-  };
-  await sessionState.setValue(current);
+export function removeCachedUnlockedKey(email: string): void {
+    unlockedKeys.delete(email.toLowerCase());
+}
+
+export function getAllCachedKeys(): Map<string, openpgp.PrivateKey> {
+    return new Map(unlockedKeys);
 }
 
 /**
- * Отримати розблокований ключ з session storage
+ * Пошук ключа за Key ID (для ефективного decrypt).
  */
-export async function getCachedUnlockedKey(
-  email: string,
-): Promise<string | null> {
-  const current = (await sessionState.getValue()) || {};
-  const keyData = current[email];
+export function findKeyByKeyId(
+    keyId: openpgp.KeyID,
+): openpgp.PrivateKey | undefined {
+    const keyIdHex = keyId.toHex();
+    for (const key of unlockedKeys.values()) {
+        const allKeyIds = [
+            key.getKeyID().toHex(),
+            ...key.getSubkeys().map((sk) => sk.getKeyID().toHex()),
+        ];
+        if (allKeyIds.includes(keyIdHex)) return key;
+    }
+    return undefined;
+}
 
-  if (!keyData) return null;
+export function hasAnyUnlockedKey(): boolean {
+    return unlockedKeys.size > 0;
+}
 
-  // Опціонально: можна додати перевірку на застарілість (наприклад, 30 хв)
-  // const isExpired = Date.now() - keyData.timestamp > 30 * 60 * 1000;
-  // if (isExpired) return null;
-
-  return keyData.armoredKey;
+export function clearAllUnlockedKeys(): void {
+    unlockedKeys.clear();
 }
 
 /**
- * Видалити розблокований ключ з кешу
+ * Alias для зворотної сумісності.
  */
-export async function removeCachedUnlockedKey(email: string): Promise<void> {
-  const current = (await sessionState.getValue()) || {};
-  delete current[email];
-  await sessionState.setValue(current);
+export function clearSessionCache(): void {
+    clearAllUnlockedKeys();
 }
 
 /**
- * Очистити весь session cache (при logout або lock vault)
+ * Перевірка реального стану vault.
+ * Оскільки ключі тільки в RAM, наявність ключів = vault розблокований.
+ * Синхронна — Map.size є синхронною властивістю.
  */
-export async function clearSessionCache(): Promise<void> {
-  await sessionState.setValue({});
+export function isVaultActuallyUnlocked(): boolean {
+    return hasAnyUnlockedKey();
 }

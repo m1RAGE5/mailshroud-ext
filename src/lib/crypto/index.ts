@@ -1,17 +1,25 @@
 // Crypto utilities barrel export
 export {
   initOpenPGP,
+  generateKeyPair,
+  validatePublicKey,
+  assertUnprotectedPrivateKey,
   deriveKey,
   encryptPrivateKey,
   decryptPrivateKey,
   generateSalt,
+  generateIV,
+  getEmailFromKey,
 } from "./cryptoService";
 
 export {
-  sessionState,
   cacheUnlockedKey,
   getCachedUnlockedKey,
   removeCachedUnlockedKey,
   clearSessionCache,
-  type UnlockedKeyData,
+  clearAllUnlockedKeys,
+  getAllCachedKeys,
+  findKeyByKeyId,
+  hasAnyUnlockedKey,
+  isVaultActuallyUnlocked,
 } from "./sessionState";
