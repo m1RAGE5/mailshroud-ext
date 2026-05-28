@@ -6,11 +6,13 @@ import {
     decryptPrivateKey,
     encryptPrivateKey,
     generateSalt,
+    generateIV,
+    generateKeyPair,
     initOpenPGP,
     cacheUnlockedKey,
     getCachedUnlockedKey,
     getAllCachedKeys,
-    findKeyByKeyId,
+    removeCachedUnlockedKey,
     clearSessionCache,
     isVaultActuallyUnlocked,
     validatePublicKey,
@@ -20,63 +22,217 @@ import {
 import type {
     MailShroudMessages,
     UnlockResult,
-    StorePrivateKeyParams,
     StorePrivateKeyResult,
-    EncryptMessageParams,
+    GenerateKeyPairResult,
     EncryptMessageResult,
+    DecryptMessageResult,
+    KeyInfo,
 } from "~/lib/types/messages";
 import {
     checkUnlockAttempt,
     recordFailedAttempt,
     resetAttempts,
-    resetAllAttempts,
     VaultLockedError,
-    LOCKOUT_DELAYS,
     getState,
 } from "~/lib/security/rateLimit";
 import { startKeepAlive, stopKeepAlive } from "~/lib/security/vaultKeepAlive";
 import { VaultError, VaultErrorCode } from "~/lib/types/error";
 
 const messenger = defineExtensionMessaging<MailShroudMessages>();
-
 const openpgpReady = initOpenPGP().catch((err) => {
     console.error("Failed to initialize OpenPGP:", err);
     throw err;
 });
 
+// ─────────────────────────────────────────────────────────────
+//  Constants
+// ─────────────────────────────────────────────────────────────
+
+const AUTO_LOCK_MINUTES = 15;
+const MAX_MESSAGE_SIZE = 1_000_000; // 1MB
+
+const RE_BASE64 =
+    /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const RE_SALT = /^[0-9a-f]{64}$/i;
+const RE_IV = /^[0-9a-f]{24}$/i;
+
+// ─────────────────────────────────────────────────────────────
+//  Helpers
+// ─────────────────────────────────────────────────────────────
+
+/** Усі KeyID (primary + subkeys) для одного ключа */
+function collectKeyIds(key: openpgp.Key): string[] {
+    return [
+        key.getKeyID().toHex(),
+        ...key.subkeys.map((sk) => sk.getKeyID().toHex()),
+    ];
+}
+
+/** Знайти приватний ключ у snapshot за KeyID повідомлення */
+function findPrivateKeyById(
+    keyId: openpgp.KeyID,
+    snapshot: Map<string, openpgp.PrivateKey>,
+): openpgp.PrivateKey | undefined {
+    const hex = keyId.toHex();
+    for (const key of snapshot.values()) {
+        if (collectKeyIds(key).includes(hex)) return key;
+    }
+    return undefined;
+}
+
+/** Знайти публічний ключ у масиві за KeyID */
+function findPublicKeyById(
+    keyId: string,
+    keys: openpgp.Key[],
+): openpgp.Key | undefined {
+    return keys.find((k) => collectKeyIds(k).includes(keyId));
+}
+
+/**
+ * Спільна логіка: розшифрувати vault-запис → прочитати PrivateKey
+ * → перевірити, що він без passphrase → звірити email.
+ */
+async function decryptAndVerifyVaultKey(
+    record: {
+        email: string;
+        encryptedArmoredKey: string;
+        salt: string;
+        iv: string;
+    },
+    masterPassword: string,
+): Promise<openpgp.PrivateKey> {
+    const cryptoKey = await deriveKey(masterPassword, record.salt);
+    let armoredKey = await decryptPrivateKey(
+        record.encryptedArmoredKey,
+        record.iv,
+        cryptoKey,
+        record.email,
+    );
+    try {
+        const privateKey = await openpgp.readPrivateKey({ armoredKey });
+        assertUnprotectedPrivateKey(privateKey);
+
+        const matchesEmail = privateKey.users.some(
+            (u) =>
+                u.userID?.email?.toLowerCase() === record.email.toLowerCase(),
+        );
+        if (!matchesEmail) {
+            throw new Error(`Key does not contain email: ${record.email}`);
+        }
+        return privateKey;
+    } finally {
+        armoredKey = "";
+    }
+}
+
+/** Тільки розшифрувати vault-запис до armored-строки (без валідації) */
+async function decryptVaultToArmored(
+    record: {
+        email: string;
+        encryptedArmoredKey: string;
+        salt: string;
+        iv: string;
+    },
+    masterPassword: string,
+): Promise<string> {
+    const cryptoKey = await deriveKey(masterPassword, record.salt);
+    return decryptPrivateKey(
+        record.encryptedArmoredKey,
+        record.iv,
+        cryptoKey,
+        record.email,
+    );
+}
+
+/** Обгорнути довільну помилку у VaultError */
+function toVaultError(
+    err: unknown,
+    fallbackCode: VaultErrorCode,
+    msg: string,
+): VaultError {
+    if (err instanceof VaultError) return err;
+    if (err instanceof VaultLockedError) {
+        return new VaultError(
+            VaultErrorCode.RATE_LIMITED,
+            err.message,
+            err.retryAfterMs,
+        );
+    }
+    return new VaultError(fallbackCode, `${msg}: ${(err as Error).message}`);
+}
+
+/** Тип signatures з openpgp.decrypt() */
+type DecryptSignatures = Awaited<
+    ReturnType<typeof openpgp.decrypt>
+>["signatures"];
+
+// ─────────────────────────────────────────────────────────────
+//  Entrypoint
+// ─────────────────────────────────────────────────────────────
+
 export default defineBackground(() => {
-    console.log("MailShroud Background Service Worker started", {
-        id: browser.runtime.id,
-    });
+    console.log("MailShroud Background started", { id: browser.runtime.id });
     setupMessageHandlers();
     setupLifecycleHandlers();
 });
 
-function setupMessageHandlers() {
+// ─────────────────────────────────────────────────────────────
+//  Lifecycle
+// ─────────────────────────────────────────────────────────────
+
+function setupLifecycleHandlers(): void {
     browser.alarms.onAlarm.addListener((alarm) => {
         if (alarm.name === "vault-auto-lock") {
-            console.log("[MailShroud] Auto-lock triggered (idle timeout)");
+            console.log("[MailShroud] Auto-lock triggered");
             handleLockVault();
         }
     });
 
-    messenger.onMessage("decryptMessage", async (message) => {
-        return await handleDecryptMessage(message.data);
+    const lockAll = () => {
+        clearSessionCache();
+        stopKeepAlive();
+    };
+
+    browser.runtime.onStartup.addListener(() => {
+        console.log("[MailShroud] Browser startup — vault locked");
+        lockAll();
     });
 
-    messenger.onMessage("encryptMessage", async (message) => {
-        const { text, recipientEmails, senderEmail } = message.data;
-        return await handleEncryptMessage(text, recipientEmails, senderEmail);
+    browser.runtime.onInstalled.addListener((details) => {
+        if (details.reason === "install" || details.reason === "update")
+            lockAll();
     });
+}
 
-    messenger.onMessage("unlockVault", async (message) => {
-        return await handleUnlockVault(message.data as string);
-    });
+// ─────────────────────────────────────────────────────────────
+//  Message handlers
+// ─────────────────────────────────────────────────────────────
 
+function setupMessageHandlers(): void {
+    // ── Crypto operations ──────────────────────────────────
+    messenger.onMessage("decryptMessage", (m) => handleDecryptMessage(m.data));
+    messenger.onMessage("encryptMessage", (m) =>
+        handleEncryptMessage(
+            m.data.text,
+            m.data.recipientEmails,
+            m.data.senderEmail,
+        ),
+    );
+
+    // ── Vault lifecycle ────────────────────────────────────
+    messenger.onMessage("unlockVault", (m) => handleUnlockVault(m.data));
     messenger.onMessage("lockVault", () => {
         handleLockVault();
     });
-    messenger.onMessage("storePrivateKey", async (message) => {
+    messenger.onMessage("isVaultUnlocked", async () =>
+        isVaultActuallyUnlocked(),
+    );
+    messenger.onMessage("changeMasterPassword", (m) =>
+        handleChangeMasterPassword(m.data.currentPassword, m.data.newPassword),
+    );
+
+    // ── Private keys ───────────────────────────────────────
+    messenger.onMessage("storePrivateKey", async (m) => {
         const {
             email,
             encryptedArmoredKey,
@@ -84,92 +240,64 @@ function setupMessageHandlers() {
             iv,
             masterPassword,
             forceOverwrite,
-        } = message.data;
-
+        } = m.data;
+        const emailLower = email.toLowerCase();
         if (!forceOverwrite) {
-            const existing = await db.privateKeys.get(email.toLowerCase());
+            const existing = await db.privateKeys.get(emailLower);
             if (existing) {
-                throw new Error(
-                    `Private key for ${email} already exists. Use forceOverwrite=true to replace.`,
+                throw new VaultError(
+                    VaultErrorCode.KEY_ALREADY_EXISTS,
+                    `Private key for ${emailLower} already exists. Use forceOverwrite=true.`,
                 );
             }
         }
-
-        return await handleStorePrivateKey(
-            email.toLowerCase(),
+        return handleStorePrivateKey(
+            emailLower,
             encryptedArmoredKey,
             salt,
             iv,
             masterPassword,
         );
     });
+    messenger.onMessage("generateKeyPair", (m) =>
+        handleGenerateKeyPair(m.data),
+    );
+    messenger.onMessage("listPrivateKeys", () => handleListPrivateKeys());
+    messenger.onMessage("deletePrivateKey", (m) =>
+        handleDeletePrivateKey(m.data),
+    );
+    messenger.onMessage("exportRevocationCertificate", (m) =>
+        handleExportRevocationCertificate(m.data),
+    );
 
-    messenger.onMessage("getPublicKey", async (message) => {
-        return await handleGetPublicKey(message.data as string);
-    });
-
-    messenger.onMessage("storePublicKey", async (message) => {
-        const { email, armoredKey } = message.data;
-        await handleStorePublicKey(email, armoredKey);
-    });
-
-    messenger.onMessage("isVaultUnlocked", async () => {
-        return isVaultActuallyUnlocked();
-    });
+    // ── Public keys ────────────────────────────────────────
+    messenger.onMessage("getPublicKey", (m) => handleGetPublicKey(m.data));
+    messenger.onMessage("storePublicKey", (m) =>
+        handleStorePublicKey(
+            m.data.email,
+            m.data.armoredKey,
+            m.data.source,
+            m.data.verified,
+        ),
+    );
+    messenger.onMessage("listPublicKeys", () => handleListPublicKeys());
+    messenger.onMessage("deletePublicKey", (m) =>
+        handleDeletePublicKey(m.data),
+    );
 }
 
-function setupLifecycleHandlers() {
-    browser.runtime.onStartup.addListener(() => {
-        console.log("[MailShroud] Browser startup — vault locked by default");
-        clearSessionCache();
-        stopKeepAlive();
-    });
+// ─────────────────────────────────────────────────────────────
+//  Decrypt
+// ─────────────────────────────────────────────────────────────
 
-    browser.runtime.onInstalled.addListener((details) => {
-        if (details.reason === "install" || details.reason === "update") {
-            clearSessionCache();
-            stopKeepAlive();
-        }
-    });
-}
-
-function findKeyByKeyIdInSnapshot(
-    keyId: openpgp.KeyID,
-    snapshot: Map<string, openpgp.PrivateKey>,
-): openpgp.PrivateKey | undefined {
-    const keyIdHex = keyId.toHex();
-    for (const key of snapshot.values()) {
-        const allKeyIds = [
-            key.getKeyID().toHex(),
-            ...key.getSubkeys().map((sk) => sk.getKeyID().toHex()),
-        ];
-        if (allKeyIds.includes(keyIdHex)) return key;
-    }
-    return undefined;
-}
-
-/**
- * Розшифрування PGP повідомлення.
- */
-async function handleDecryptMessage(armoredText: string): Promise<{
-    data: string;
-    signaturesValid: boolean[];
-    signerEmails: (string | null)[];
-}> {
+async function handleDecryptMessage(
+    armoredText: string,
+): Promise<DecryptMessageResult> {
     try {
         if (!isVaultActuallyUnlocked()) {
             throw new VaultError(VaultErrorCode.LOCKED, "Vault is locked.");
         }
-
-        const keySnapshot = getAllCachedKeys();
-        if (keySnapshot.size === 0) {
-            throw new VaultError(
-                VaultErrorCode.LOCKED,
-                "Vault was locked during operation.",
-            );
-        }
-
-        if (armoredText.length > 1_000_000) {
+        if (armoredText.length > MAX_MESSAGE_SIZE) {
             throw new Error("Message too large (max 1MB)");
         }
 
@@ -178,16 +306,15 @@ async function handleDecryptMessage(armoredText: string): Promise<{
             armoredMessage: armoredText,
         });
 
+        const snapshot = getAllCachedKeys();
         const encryptionKeyIds = await message.getEncryptionKeyIDs();
         if (encryptionKeyIds.length === 0) {
             throw new Error("Message has no encryption key IDs");
         }
 
-        const decryptionKeys: openpgp.PrivateKey[] = [];
-        for (const keyId of encryptionKeyIds) {
-            const key = findKeyByKeyIdInSnapshot(keyId, keySnapshot);
-            if (key) decryptionKeys.push(key);
-        }
+        const decryptionKeys = encryptionKeyIds
+            .map((id) => findPrivateKeyById(id, snapshot))
+            .filter((k): k is openpgp.PrivateKey => !!k);
 
         if (decryptionKeys.length === 0) {
             throw new VaultError(
@@ -196,13 +323,7 @@ async function handleDecryptMessage(armoredText: string): Promise<{
             );
         }
 
-        const allPublicRecords = await db.publicKeys.toArray();
-        const verificationKeys: openpgp.Key[] = await Promise.all(
-            allPublicRecords.map((r) =>
-                openpgp.readKey({ armoredKey: r.armoredKey }),
-            ),
-        );
-
+        const verificationKeys = await loadAllPublicKeys();
         const { data, signatures } = await openpgp.decrypt({
             message,
             decryptionKeys,
@@ -210,56 +331,57 @@ async function handleDecryptMessage(armoredText: string): Promise<{
             expectSigned: false,
         });
 
-        const signaturesValid: boolean[] = [];
-        const signerEmails: (string | null)[] = [];
-
-        if (signatures.length === 0) {
-            signaturesValid.push(false);
-            signerEmails.push(null);
-        } else {
-            for (const sig of signatures) {
-                try {
-                    await sig.verified;
-                    signaturesValid.push(true);
-                    const keyIdHex = sig.keyID.toHex();
-                    const signerKey = verificationKeys.find((k) => {
-                        const allKeyIds = [
-                            k.getKeyID().toHex(),
-                            ...k.subkeys.map((sk) => sk.getKeyID().toHex()),
-                        ];
-                        return allKeyIds.includes(keyIdHex);
-                    });
-                    signerEmails.push(
-                        signerKey?.users[0]?.userID?.email ?? null,
-                    );
-                } catch {
-                    signaturesValid.push(false);
-                    signerEmails.push(null);
-                }
-            }
-        }
-
+        const result = await verifySignatures(signatures, verificationKeys);
         refreshAutoLock();
-        return { data: data as string, signaturesValid, signerEmails };
-    } catch (error) {
-        if (error instanceof VaultError) throw error;
-        if (error instanceof VaultLockedError) {
-            throw new VaultError(
-                VaultErrorCode.RATE_LIMITED,
-                error.message,
-                error.retryAfterMs,
-            );
-        }
-        throw new VaultError(
+        return { data: data as string, ...result };
+    } catch (err) {
+        throw toVaultError(
+            err,
             VaultErrorCode.CORRUPTED_DATA,
-            `Decryption failed: ${(error as Error).message}`,
+            "Decryption failed",
         );
     }
 }
 
-/**
- * Шифрування повідомлення для отримувачів
- */
+async function loadAllPublicKeys(): Promise<openpgp.Key[]> {
+    const records = await db.publicKeys.toArray();
+    return Promise.all(
+        records.map((r) => openpgp.readKey({ armoredKey: r.armoredKey })),
+    );
+}
+
+async function verifySignatures(
+    signatures: DecryptSignatures,
+    verificationKeys: openpgp.Key[],
+): Promise<{ signaturesValid: boolean[]; signerEmails: (string | null)[] }> {
+    const signaturesValid: boolean[] = [];
+    const signerEmails: (string | null)[] = [];
+
+    if (!signatures || signatures.length === 0) {
+        return { signaturesValid: [false], signerEmails: [null] };
+    }
+
+    for (const sig of signatures) {
+        try {
+            await sig.verified;
+            signaturesValid.push(true);
+            const signer = findPublicKeyById(
+                sig.keyID.toHex(),
+                verificationKeys,
+            );
+            signerEmails.push(signer?.users[0]?.userID?.email ?? null);
+        } catch {
+            signaturesValid.push(false);
+            signerEmails.push(null);
+        }
+    }
+    return { signaturesValid, signerEmails };
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Encrypt
+// ─────────────────────────────────────────────────────────────
+
 async function handleEncryptMessage(
     text: string,
     recipientEmails: string[],
@@ -267,72 +389,15 @@ async function handleEncryptMessage(
 ): Promise<EncryptMessageResult> {
     try {
         await openpgpReady;
-        if (recipientEmails.length === 0) {
+        if (recipientEmails.length === 0)
             throw new Error("No recipients specified");
-        }
 
-        const encryptionKeys: openpgp.Key[] = [];
-        for (const email of recipientEmails) {
-            const record = await db.publicKeys.get(email.toLowerCase());
-            if (!record) {
-                throw new Error(`Public key not found for ${email}`);
-            }
-            const publicKey = await openpgp.readKey({
-                armoredKey: record.armoredKey,
-            });
+        const encryptionKeys = await Promise.all(
+            recipientEmails.map(loadAndValidateRecipientKey),
+        );
 
-            try {
-                await publicKey.verifyPrimaryKey();
-            } catch (err) {
-                throw new Error(
-                    `Key for ${email} is invalid: ${(err as Error).message}`,
-                );
-            }
-
-            if (await publicKey.isRevoked()) {
-                throw new Error(`Key for ${email} is revoked`);
-            }
-
-            const encryptionKey = await publicKey.getEncryptionKey();
-            if (!encryptionKey) {
-                throw new Error(
-                    `No valid (non-expired) encryption subkey for ${email}`,
-                );
-            }
-            encryptionKeys.push(publicKey);
-        }
-
-        const signingKeys: openpgp.PrivateKey[] = [];
-        const allOwnKeys = getAllCachedKeys();
-        let signingKey: openpgp.PrivateKey | undefined;
-
-        if (senderEmail) {
-            signingKey = getCachedUnlockedKey(senderEmail);
-        }
-
-        if (!signingKey) {
-            if (allOwnKeys.size === 1) {
-                signingKey = allOwnKeys.values().next().value ?? undefined;
-            } else if (allOwnKeys.size > 1) {
-                throw new Error(
-                    "Multiple private keys available. Please select a signing key explicitly.",
-                );
-            } else if (allOwnKeys.size === 0) {
-                if (import.meta.env.DEV) {
-                    console.warn(
-                        "No unlocked private keys — message will NOT be signed",
-                    );
-                }
-            }
-        }
-
-        if (signingKey) {
-            signingKeys.push(signingKey);
-        } else {
-            console.warn(
-                "[MailShroud] No unlocked private key available — message will NOT be signed",
-            );
-        }
+        const signingKey = pickSigningKey(senderEmail);
+        const signingKeys = signingKey ? [signingKey] : [];
 
         const encrypted = await openpgp.encrypt({
             message: await openpgp.createMessage({ text }),
@@ -340,100 +405,132 @@ async function handleEncryptMessage(
             signingKeys,
         });
 
-        if (signingKeys.length > 0) {
-            refreshAutoLock();
-        }
+        if (signingKey) refreshAutoLock();
 
         return {
             encrypted: encrypted as string,
             signed: signingKeys.length > 0,
             signerEmail: signingKey ? getEmailFromKey(signingKey) : undefined,
         };
-    } catch (error) {
-        if (import.meta.env.DEV) console.error("Encryption failed:", error);
-        else console.error("Encryption failed:", (error as Error).message);
-        throw error;
+    } catch (err) {
+        if (import.meta.env.DEV) console.error("Encryption failed:", err);
+        throw err;
     }
 }
 
-/**
- * Розблокування vault з Master Password.
- * Ключі зберігаються як openpgp.PrivateKey об'єкти в RAM.
- */
+async function loadAndValidateRecipientKey(
+    email: string,
+): Promise<openpgp.Key> {
+    const record = await db.publicKeys.get(email.toLowerCase());
+    if (!record) throw new Error(`Public key not found for ${email}`);
+
+    const publicKey = await openpgp.readKey({ armoredKey: record.armoredKey });
+    try {
+        await publicKey.verifyPrimaryKey();
+    } catch (err) {
+        throw new Error(
+            `Key for ${email} is invalid: ${(err as Error).message}`,
+        );
+    }
+    if (await publicKey.isRevoked()) {
+        throw new VaultError(
+            VaultErrorCode.KEY_REVOKED,
+            `Key for ${email} is revoked`,
+        );
+    }
+    const expiration = await publicKey.getExpirationTime();
+    if (
+        expiration !== Infinity &&
+        expiration !== null &&
+        expiration < new Date()
+    ) {
+        throw new VaultError(
+            VaultErrorCode.KEY_EXPIRED,
+            `Key for ${email} is expired`,
+        );
+    }
+
+    const encKey = await publicKey.getEncryptionKey();
+    if (!encKey) throw new Error(`No valid encryption subkey for ${email}`);
+    return publicKey;
+}
+
+function pickSigningKey(senderEmail?: string): openpgp.PrivateKey | undefined {
+    const allOwnKeys = getAllCachedKeys();
+
+    if (senderEmail) {
+        const key = getCachedUnlockedKey(senderEmail);
+        if (key) return key;
+    }
+    if (allOwnKeys.size === 1)
+        return allOwnKeys.values().next().value ?? undefined;
+    if (allOwnKeys.size > 1) {
+        throw new Error(
+            "Multiple private keys available. Please select a signing key explicitly.",
+        );
+    }
+    if (import.meta.env.DEV) {
+        console.warn("No unlocked private keys — message will NOT be signed");
+    }
+    return undefined;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Unlock / Lock
+// ─────────────────────────────────────────────────────────────
+
 async function handleUnlockVault(
     masterPassword: string,
 ): Promise<UnlockResult> {
     await openpgpReady;
     const allPrivateKeys = await db.privateKeys.toArray();
-
     if (allPrivateKeys.length === 0) {
         return { success: false, unlocked: 0, failed: 0, failedEmails: [] };
     }
 
     const lockedEmails: string[] = [];
-    for (const keyRecord of allPrivateKeys) {
+    for (const rec of allPrivateKeys) {
         try {
-            await checkUnlockAttempt(keyRecord.email);
+            await checkUnlockAttempt(rec.email);
         } catch (err) {
-            if (err instanceof VaultLockedError) {
-                lockedEmails.push(keyRecord.email);
-            } else {
-                throw err;
-            }
+            if (err instanceof VaultLockedError) lockedEmails.push(rec.email);
+            else throw err;
         }
     }
 
     if (lockedEmails.length === allPrivateKeys.length) {
         const state = await getState();
-        const maxLockedUntil = Math.max(
+        const maxUntil = Math.max(
             ...lockedEmails.map((e) => state[e]?.lockedUntil ?? 0),
         );
-        const retryAfterMs = Math.max(0, maxLockedUntil - Date.now());
-        throw new VaultLockedError(retryAfterMs);
+        throw new VaultLockedError(Math.max(0, maxUntil - Date.now()));
     }
 
-    const unlockableKeys = allPrivateKeys.filter(
+    const unlockable = allPrivateKeys.filter(
         (k) => !lockedEmails.includes(k.email),
     );
-
     const results = await Promise.allSettled(
-        unlockableKeys.map((keyRecord) =>
-            unlockSingleKey(keyRecord, masterPassword),
-        ),
+        unlockable.map((rec) => unlockSingleKey(rec, masterPassword)),
     );
 
     let unlockedCount = 0;
     const failedEmails: string[] = [];
-
     for (let i = 0; i < results.length; i++) {
-        const result = results[i]!;
-        const keyRecord = unlockableKeys[i]!;
+        const r = results[i]!;
+        const rec = unlockable[i]!;
 
-        if (result.status === "fulfilled") {
-            if (result.value.success) {
-                unlockedCount++;
-                await resetAttempts(keyRecord.email);
-            } else {
-                failedEmails.push(keyRecord.email);
-                await recordFailedAttempt(keyRecord.email);
-                if (import.meta.env.DEV) {
-                    console.warn(
-                        `[MailShroud] Email mismatch for key ${keyRecord.email} — ` +
-                            `possible vault tampering`,
-                    );
-                }
-            }
+        if (r.status === "fulfilled" && r.value) {
+            unlockedCount++;
+            await resetAttempts(rec.email);
         } else {
-            if (result.reason instanceof VaultLockedError) {
-                throw result.reason;
-            }
-
-            await recordFailedAttempt(keyRecord.email);
-            failedEmails.push(keyRecord.email);
+            failedEmails.push(rec.email);
+            await recordFailedAttempt(rec.email);
+            if (r.status === "rejected" && r.reason instanceof VaultLockedError)
+                throw r.reason;
             if (import.meta.env.DEV) {
                 console.warn(
-                    `Failed to unlock key for ${keyRecord.email}:`,
-                    result.reason,
+                    `Failed to unlock ${rec.email}:`,
+                    r.status === "rejected" ? r.reason : "email mismatch",
                 );
             }
         }
@@ -452,82 +549,55 @@ async function handleUnlockVault(
     };
 }
 
-/** Внутрішня helper-функція для одного ключа */
 async function unlockSingleKey(
-    keyRecord: {
+    record: {
         email: string;
         encryptedArmoredKey: string;
         salt: string;
         iv: string;
     },
     masterPassword: string,
-): Promise<{ success: boolean }> {
-    const cryptoKey = await deriveKey(masterPassword, keyRecord.salt);
-    let armoredKey = "";
+): Promise<boolean> {
     try {
-        armoredKey = await decryptPrivateKey(
-            keyRecord.encryptedArmoredKey,
-            keyRecord.iv,
-            cryptoKey,
-            keyRecord.email,
+        const privateKey = await decryptAndVerifyVaultKey(
+            record,
+            masterPassword,
         );
-    } catch (err) {
-        armoredKey = "";
-        throw err;
-    }
-
-    try {
-        const privateKey = await openpgp.readPrivateKey({ armoredKey });
-        assertUnprotectedPrivateKey(privateKey);
-
-        const matchesEmail = privateKey.users.some((user) => {
-            const userEmail = user.userID?.email;
-            return userEmail?.toLowerCase() === keyRecord.email.toLowerCase();
-        });
-
-        if (!matchesEmail) {
-            return { success: false };
-        }
-
-        cacheUnlockedKey(keyRecord.email, privateKey);
-        return { success: true };
-    } finally {
-        armoredKey = "";
+        cacheUnlockedKey(record.email, privateKey);
+        return true;
+    } catch {
+        return false;
     }
 }
 
-const AUTO_LOCK_MINUTES = 15;
+// ─────────────────────────────────────────────────────────────
+//  Auto-lock
+// ─────────────────────────────────────────────────────────────
 
 function scheduleAutoLock(): void {
     browser.alarms.create("vault-auto-lock", {
         delayInMinutes: AUTO_LOCK_MINUTES,
     });
 }
-
 function cancelAutoLock(): void {
     browser.alarms.clear("vault-auto-lock");
 }
-
-/** Оновити таймер авто-локу (викликати при активності) */
 function refreshAutoLock(): void {
     if (!isVaultActuallyUnlocked()) return;
     cancelAutoLock();
     scheduleAutoLock();
 }
-
-/**
- * Блокування vault
- */
 function handleLockVault(): void {
     cancelAutoLock();
     clearSessionCache();
     stopKeepAlive();
-    console.log("Vault locked");
+    console.log("[MailShroud] Vault locked");
 }
 
-/**
- * Збереження зашифрованого приватного ключа
- */
+// ─────────────────────────────────────────────────────────────
+//  Store / Get / List / Delete keys
+// ─────────────────────────────────────────────────────────────
+
 async function handleStorePrivateKey(
     email: string,
     encryptedArmoredKey: string,
@@ -535,90 +605,263 @@ async function handleStorePrivateKey(
     iv: string,
     masterPassword: string,
 ): Promise<StorePrivateKeyResult> {
-    if (!email || !email.includes("@")) {
-        throw new Error("Invalid email format");
-    }
-    if (
-        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
-            encryptedArmoredKey,
-        )
-    ) {
+    if (!email.includes("@")) throw new Error("Invalid email format");
+    if (!RE_BASE64.test(encryptedArmoredKey))
         throw new Error("Invalid base64 format");
-    }
-    if (!/^[0-9a-f]{64}$/i.test(salt)) {
-        throw new Error("Invalid salt: expected 64 hex chars (32 bytes)");
-    }
-    if (!/^[0-9a-f]{24}$/i.test(iv)) {
-        throw new Error("Invalid iv: expected 24 hex chars (12 bytes)");
-    }
+    if (!RE_SALT.test(salt))
+        throw new Error("Invalid salt: expected 64 hex chars");
+    if (!RE_IV.test(iv)) throw new Error("Invalid iv: expected 24 hex chars");
 
-    const cryptoKey = await deriveKey(masterPassword, salt);
-    let armoredKey = "";
-    let realFingerprint = "";
-    try {
-        armoredKey = await decryptPrivateKey(
-            encryptedArmoredKey,
-            iv,
-            cryptoKey,
-            email.toLowerCase(),
-        );
-        const privateKey = await openpgp.readPrivateKey({ armoredKey });
-        assertUnprotectedPrivateKey(privateKey);
-
-        const matchesEmail = privateKey.users.some((user) => {
-            const userEmail = user.userID?.email;
-            return userEmail?.toLowerCase() === email.toLowerCase();
-        });
-        if (!matchesEmail) {
-            throw new Error(`Key does not contain email: ${email}`);
-        }
-
-        realFingerprint = privateKey.getFingerprint();
-    } finally {
-        armoredKey = "";
-    }
+    const privateKey = await decryptAndVerifyVaultKey(
+        { email, encryptedArmoredKey, salt, iv },
+        masterPassword,
+    );
+    const fingerprint = privateKey.getFingerprint();
 
     await db.privateKeys.put({
-        email: email.toLowerCase(),
+        email,
         encryptedArmoredKey,
         salt,
         iv,
-        keyFingerprint: realFingerprint,
+        keyFingerprint: fingerprint,
         createdAt: Date.now(),
         updatedAt: Date.now(),
     });
 
-    return {
-        fingerprint: realFingerprint,
-        email: email.toLowerCase(),
-    };
+    return { fingerprint, email };
 }
 
-/**
- * Отримання публічного ключа
- */
 async function handleGetPublicKey(email: string): Promise<string | null> {
-    const record = await db.publicKeys.get(email);
-    return record ? record.armoredKey : null;
+    const record = await db.publicKeys.get(email.toLowerCase());
+    return record?.armoredKey ?? null;
 }
 
-/**
- * Збереження публічного ключа
- */
 async function handleStorePublicKey(
     email: string,
     armoredKey: string,
+    source: "wkd" | "hkp" | "autocrypt" | "manual" | "key-gossip" = "manual",
+    verified = false,
 ): Promise<void> {
     const validatedKey = await validatePublicKey(armoredKey, email);
-
     await db.publicKeys.put({
         email: email.toLowerCase(),
         armoredKey,
         keyFingerprint: validatedKey.getFingerprint(),
-        source: "manual",
-        verified: false,
+        source,
+        verified,
         createdAt: Date.now(),
     });
+    console.log(
+        `[MailShroud] Public key stored for ${email} (source=${source})`,
+    );
+}
 
-    console.log(`Public key stored for ${email}`);
+async function handleListPrivateKeys(): Promise<KeyInfo[]> {
+    const records = await db.privateKeys.toArray();
+    return records.map((r) => ({
+        email: r.email,
+        fingerprint: r.keyFingerprint,
+        createdAt: r.createdAt,
+    }));
+}
+
+async function handleListPublicKeys(): Promise<KeyInfo[]> {
+    const records = await db.publicKeys.toArray();
+    return records.map((r) => ({
+        email: r.email,
+        fingerprint: r.keyFingerprint,
+        createdAt: r.createdAt,
+        source: r.source,
+        verified: r.verified,
+    }));
+}
+
+async function handleDeletePrivateKey(email: string): Promise<void> {
+    const emailLower = email.toLowerCase();
+    await db.transaction("rw", db.privateKeys, db.settings, async () => {
+        await db.privateKeys.delete(emailLower);
+        await db.settings.delete(`revocation:${emailLower}`);
+    });
+    removeCachedUnlockedKey(emailLower);
+    console.log(`[MailShroud] Private key deleted for ${emailLower}`);
+}
+
+async function handleDeletePublicKey(email: string): Promise<void> {
+    await db.publicKeys.delete(email.toLowerCase());
+    console.log(`[MailShroud] Public key deleted for ${email}`);
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Generate key pair
+// ─────────────────────────────────────────────────────────────
+
+async function handleGenerateKeyPair(params: {
+    email: string;
+    name?: string;
+    masterPassword: string;
+}): Promise<GenerateKeyPairResult> {
+    await openpgpReady;
+    const emailLower = params.email.toLowerCase();
+
+    const existing = await db.privateKeys.get(emailLower);
+    if (existing) {
+        throw new VaultError(
+            VaultErrorCode.KEY_ALREADY_EXISTS,
+            `Private key for ${emailLower} already exists`,
+        );
+    }
+
+    // Генерація v6 ключа (curve25519 + AEAD)
+    const { privateKey, publicKey, revocationCertificate } =
+        await generateKeyPair(emailLower, params.name);
+
+    // Шифрування приватного ключа майстер-паролем
+    const salt = generateSalt();
+    const iv = generateIV();
+    const cryptoKey = await deriveKey(params.masterPassword, salt);
+    const { encryptedData } = await encryptPrivateKey(
+        privateKey,
+        cryptoKey,
+        emailLower,
+    );
+
+    // Читання для fingerprint-ів
+    const privKeyObj = await openpgp.readPrivateKey({ armoredKey: privateKey });
+    const pubKeyObj = await openpgp.readKey({ armoredKey: publicKey });
+
+    // Атомарне збереження в БД
+    await db.transaction(
+        "rw",
+        db.privateKeys,
+        db.publicKeys,
+        db.settings,
+        async () => {
+            await db.privateKeys.add({
+                email: emailLower,
+                encryptedArmoredKey: encryptedData,
+                salt,
+                iv,
+                keyFingerprint: privKeyObj.getFingerprint(),
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+            });
+
+            await db.publicKeys.add({
+                email: emailLower,
+                armoredKey: publicKey,
+                keyFingerprint: pubKeyObj.getFingerprint(),
+                source: "manual",
+                verified: true, // self-generated = trusted
+                createdAt: Date.now(),
+            });
+
+            // Revocation certificate зберігається окремо в settings
+            await db.settings.put({
+                key: `revocation:${emailLower}`,
+                value: revocationCertificate,
+            });
+        },
+    );
+
+    return {
+        privateKeyFingerprint: privKeyObj.getFingerprint(),
+        publicKeyArmored: publicKey,
+        revocationCertificate,
+        email: emailLower,
+    };
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Change master password
+// ─────────────────────────────────────────────────────────────
+
+async function handleChangeMasterPassword(
+    currentPassword: string,
+    newPassword: string,
+): Promise<void> {
+    await openpgpReady;
+    const allKeys = await db.privateKeys.toArray();
+    if (allKeys.length === 0) return;
+
+    // Крок 1: розшифрувати ВСІ ключі старим паролем (валідація current)
+    const decryptedArmored: Array<{
+        record: (typeof allKeys)[number];
+        armoredKey: string;
+    }> = [];
+
+    for (const record of allKeys) {
+        try {
+            const armoredKey = await decryptVaultToArmored(
+                record,
+                currentPassword,
+            );
+            decryptedArmored.push({ record, armoredKey });
+        } catch {
+            // Очистити вже розшифровані перед помилкою
+            for (const d of decryptedArmored) d.armoredKey = "";
+            throw new VaultError(
+                VaultErrorCode.INVALID_PASSWORD,
+                "Current master password is incorrect",
+            );
+        }
+    }
+
+    // Крок 2: перешифрувати ВСІ новим паролем
+    const updates: Array<{
+        email: string;
+        encryptedArmoredKey: string;
+        salt: string;
+        iv: string;
+    }> = [];
+
+    try {
+        for (const { record, armoredKey } of decryptedArmored) {
+            const newSalt = generateSalt();
+            const newIv = generateIV();
+            const newCryptoKey = await deriveKey(newPassword, newSalt);
+            const { encryptedData } = await encryptPrivateKey(
+                armoredKey,
+                newCryptoKey,
+                record.email,
+            );
+            updates.push({
+                email: record.email,
+                encryptedArmoredKey: encryptedData,
+                salt: newSalt,
+                iv: newIv,
+            });
+        }
+    } finally {
+        // Очистити plaintext з пам'яті
+        for (const d of decryptedArmored) d.armoredKey = "";
+    }
+
+    // Крок 3: атомарно оновити БД
+    await db.transaction("rw", db.privateKeys, async () => {
+        for (const u of updates) {
+            await db.privateKeys.update(u.email, {
+                encryptedArmoredKey: u.encryptedArmoredKey,
+                salt: u.salt,
+                iv: u.iv,
+                updatedAt: Date.now(),
+            }); 
+        }
+    });
+
+    // Крок 4: примусовий re-lock (заставити користувача увійти з новим паролем)
+    handleLockVault();
+    console.log("[MailShroud] Master password changed successfully");
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Export revocation certificate
+// ─────────────────────────────────────────────────────────────
+
+async function handleExportRevocationCertificate(
+    email: string,
+): Promise<string | null> {
+    const emailLower = email.toLowerCase();
+    const record = await db.settings.get(`revocation:${emailLower}`);
+    if (!record || typeof record.value !== "string") return null;
+    return record.value;
 }

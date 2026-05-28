@@ -1,18 +1,28 @@
 import { browser } from "wxt/browser";
 import { VaultLockTimeoutError } from "../types/error";
 
+// ─────────────────────────────────────────────────────────────
+//  Types & Constants
+// ─────────────────────────────────────────────────────────────
+
 interface AttemptState {
     count: number;
     lockedUntil: number;
 }
 
-const STORAGE_KEY = "vault_lockout_state";
+type LockoutState = Record<string, AttemptState>;
+
 const SESSION_KEY = "vault_lockout_session";
 const PERSISTENT_KEY = "vault_lockout_persistent";
 
-// Прогресивний lockout
-export const LOCKOUT_DELAYS = [5_000, 30_000, 120_000, 600_000, 3_600_000];
+/** lockout: 5s → 30s → 2m → 10m → 1h */
+const LOCKOUT_DELAYS = [5_000, 30_000, 120_000, 600_000, 3_600_000] as const;
 const MAX_ATTEMPTS_BEFORE_LOCK = 3;
+const LOCK_TIMEOUT_MS = 5_000;
+
+// ─────────────────────────────────────────────────────────────
+//  Error
+// ─────────────────────────────────────────────────────────────
 
 export class VaultLockedError extends Error {
     constructor(public readonly retryAfterMs: number) {
@@ -23,42 +33,47 @@ export class VaultLockedError extends Error {
     }
 }
 
-export async function getState(): Promise<Record<string, AttemptState>> {
+// ─────────────────────────────────────────────────────────────
+//  Storage (dual-write: session + persistent для стійкості)
+// ─────────────────────────────────────────────────────────────
+
+export async function getState(): Promise<LockoutState> {
     const [sessionResult, persistentResult] = await Promise.all([
         browser.storage.session.get(SESSION_KEY),
         browser.storage.local.get(PERSISTENT_KEY),
     ]);
 
-    const session =
-        (sessionResult[SESSION_KEY] as Record<string, AttemptState>) ?? {};
-    const persistent =
-        (persistentResult[PERSISTENT_KEY] as Record<string, AttemptState>) ??
-        {};
+    const session = (sessionResult[SESSION_KEY] as LockoutState) ?? {};
+    const persistent = (persistentResult[PERSISTENT_KEY] as LockoutState) ?? {};
 
-    const merged: Record<string, AttemptState> = { ...persistent };
+    // Merge: беремо максимум для захисту від ручного очищення session storage
+    const merged: LockoutState = { ...persistent };
     for (const [email, s] of Object.entries(session)) {
         const p = merged[email];
         merged[email] = {
-            count: Math.max(p?.count ?? 0, s.count ?? 0),
-            lockedUntil: Math.max(p?.lockedUntil ?? 0, s.lockedUntil ?? 0),
+            count: Math.max(p?.count ?? 0, s.count),
+            lockedUntil: Math.max(p?.lockedUntil ?? 0, s.lockedUntil),
         };
     }
     return merged;
 }
 
-async function setState(state: Record<string, AttemptState>): Promise<void> {
+async function setState(state: LockoutState): Promise<void> {
     await Promise.all([
         browser.storage.session.set({ [SESSION_KEY]: state }),
         browser.storage.local.set({ [PERSISTENT_KEY]: state }),
     ]);
 }
 
-let stateLock: Promise<void> = Promise.resolve();
+// ─────────────────────────────────────────────────────────────
+//  Concurrency Lock (захист від race conditions)
+// ─────────────────────────────────────────────────────────────
 
-const LOCK_TIMEOUT_MS = 5_000;
+let stateLock: Promise<void> = Promise.resolve();
 
 function withLock<T>(fn: () => Promise<T>): Promise<T> {
     const next = stateLock.then(fn, fn);
+
     const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(
             () => reject(new VaultLockTimeoutError(LOCK_TIMEOUT_MS)),
@@ -82,18 +97,24 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
     return Promise.race([next, timeoutPromise]);
 }
 
+// ─────────────────────────────────────────────────────────────
+//  Public API
+// ─────────────────────────────────────────────────────────────
+
 export async function checkUnlockAttempt(email: string): Promise<void> {
     return withLock(async () => {
         const state = await getState();
         const record = state[email];
+        if (!record) return;
+
         const now = Date.now();
 
-        if (record && record.lockedUntil > 0 && record.lockedUntil <= now) {
+        // Автоматичне розблокування після закінчення lockout-періоду
+        if (record.lockedUntil > 0 && record.lockedUntil <= now) {
             delete state[email];
             await setState(state);
+            return;
         }
-
-        if (!record) return;
 
         if (record.lockedUntil > now) {
             throw new VaultLockedError(record.lockedUntil - now);
@@ -106,19 +127,19 @@ export async function recordFailedAttempt(email: string): Promise<void> {
         const state = await getState();
         const now = Date.now();
         const record = state[email] ?? { count: 0, lockedUntil: 0 };
-        if (record.lockedUntil > now) {
-            return;
-        }
+
+        if (record.lockedUntil > now) return;
 
         record.count++;
-        if (record.count > MAX_ATTEMPTS_BEFORE_LOCK) {
+
+        if (record.count >= MAX_ATTEMPTS_BEFORE_LOCK) {
             const delayIndex = Math.min(
-                record.count - MAX_ATTEMPTS_BEFORE_LOCK - 1,
+                record.count - MAX_ATTEMPTS_BEFORE_LOCK,
                 LOCKOUT_DELAYS.length - 1,
             );
-            const delay = LOCKOUT_DELAYS[delayIndex]!;
-            record.lockedUntil = now + delay;
+            record.lockedUntil = now + LOCKOUT_DELAYS[delayIndex]!;
         }
+
         state[email] = record;
         await setState(state);
     });
@@ -127,16 +148,9 @@ export async function recordFailedAttempt(email: string): Promise<void> {
 export async function resetAttempts(email: string): Promise<void> {
     return withLock(async () => {
         const state = await getState();
-        delete state[email];
-        await setState(state);
-    });
-}
-
-export async function resetAllAttempts(): Promise<void> {
-    return withLock(async () => {
-        await Promise.all([
-            browser.storage.session.remove(SESSION_KEY),
-            browser.storage.local.remove(PERSISTENT_KEY),
-        ]);
+        if (email in state) {
+            delete state[email];
+            await setState(state);
+        }
     });
 }

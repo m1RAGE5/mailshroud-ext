@@ -1,5 +1,9 @@
 import Dexie, { type Table } from "dexie";
 
+// ─────────────────────────────────────────────────────────────
+//  Records
+// ─────────────────────────────────────────────────────────────
+
 export interface PrivateKeyRecord {
     email: string;
     encryptedArmoredKey: string;
@@ -31,12 +35,65 @@ export type SettingsKey =
     | "autoLockMinutes"
     | "preferredKeyServer"
     | "wkdEnabled"
-    | "hkEnabled";
+    | "hkEnabled"
+    | `revocation:${string}`;
 
 export interface SettingRecord {
     key: SettingsKey;
     value: string | number | boolean;
 }
+
+// ─────────────────────────────────────────────────────────────
+//  Constants
+// ─────────────────────────────────────────────────────────────
+
+/** v6 fingerprint = 32 bytes = 64 hex chars (тільки v6!) */
+const V6_FINGERPRINT_LENGTH = 64;
+const BASE64_REGEX =
+    /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const PGP_PUBLIC_KEY_HEADER = "-----BEGIN PGP PUBLIC KEY BLOCK-----";
+
+// ─────────────────────────────────────────────────────────────
+//  Validators
+// ─────────────────────────────────────────────────────────────
+
+function validatePrivateKey(obj: Partial<PrivateKeyRecord>): void {
+    if (!obj.email?.includes("@")) {
+        throw new Error("Invalid email format");
+    }
+    if (
+        !obj.keyFingerprint ||
+        obj.keyFingerprint.length !== V6_FINGERPRINT_LENGTH
+    ) {
+        throw new Error(
+            `Invalid v6 fingerprint length: ${obj.keyFingerprint?.length}. Expected ${V6_FINGERPRINT_LENGTH} hex chars.`,
+        );
+    }
+    if (!BASE64_REGEX.test(obj.encryptedArmoredKey ?? "")) {
+        throw new Error("Invalid encrypted key format (not base64)");
+    }
+}
+
+function validatePublicKey(obj: Partial<PublicKeyRecord>): void {
+    if (!obj.armoredKey?.includes(PGP_PUBLIC_KEY_HEADER)) {
+        throw new Error("Invalid armored public key");
+    }
+    if (!obj.email?.includes("@")) {
+        throw new Error("Invalid email format");
+    }
+    if (
+        !obj.keyFingerprint ||
+        obj.keyFingerprint.length !== V6_FINGERPRINT_LENGTH
+    ) {
+        throw new Error(
+            `Invalid v6 fingerprint length: ${obj.keyFingerprint?.length}. Expected ${V6_FINGERPRINT_LENGTH} hex chars.`,
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Database
+// ─────────────────────────────────────────────────────────────
 
 export class MailShroudDB extends Dexie {
     privateKeys!: Table<PrivateKeyRecord, string>;
@@ -52,30 +109,20 @@ export class MailShroudDB extends Dexie {
             settings: "&key",
         });
 
-        this.privateKeys.hook("creating", (primKey, obj) => {
-            if (!obj.email?.includes("@")) {
-                throw new Error("Invalid email format");
-            }
-            if (
-                !obj.keyFingerprint ||
-                (obj.keyFingerprint.length !== 64 &&
-                    obj.keyFingerprint.length !== 40)
-            ) {
-                throw new Error(
-                    `Invalid key fingerprint length: ${obj.keyFingerprint?.length}. ` +
-                        `Expected 64 (v6) or 40 (v4) hex characters.`,
-                );
-            }
-            if (!/^[A-Za-z0-9+/=]+$/.test(obj.encryptedArmoredKey)) {
-                throw new Error("Invalid encrypted key format");
+        // захист від silent corruption
+        this.privateKeys.hook("creating", (_pk, obj) =>
+            validatePrivateKey(obj),
+        );
+        this.privateKeys.hook("updating", (mods) => {
+            if (Object.keys(mods).length > 0) {
+                validatePrivateKey(mods as Partial<PrivateKeyRecord>);
             }
         });
 
-        this.publicKeys.hook("creating", (primKey, obj) => {
-            if (
-                !obj.armoredKey.includes("-----BEGIN PGP PUBLIC KEY BLOCK-----")
-            ) {
-                throw new Error("Invalid armored public key");
+        this.publicKeys.hook("creating", (_pk, obj) => validatePublicKey(obj));
+        this.publicKeys.hook("updating", (mods) => {
+            if (Object.keys(mods).length > 0) {
+                validatePublicKey(mods as Partial<PublicKeyRecord>);
             }
         });
     }

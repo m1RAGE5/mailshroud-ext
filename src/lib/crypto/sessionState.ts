@@ -9,6 +9,10 @@ import * as openpgp from "openpgp";
  */
 const unlockedKeys = new Map<string, openpgp.PrivateKey>();
 
+// ─────────────────────────────────────────────────────────────
+//  Cache Operations
+// ─────────────────────────────────────────────────────────────
+
 export function cacheUnlockedKey(
     email: string,
     privateKey: openpgp.PrivateKey,
@@ -27,46 +31,23 @@ export function removeCachedUnlockedKey(email: string): void {
 }
 
 export function getAllCachedKeys(): Map<string, openpgp.PrivateKey> {
+    // Повертаємо копію для ізоляції від зовнішніх мутацій
     return new Map(unlockedKeys);
 }
 
-/**
- * Пошук ключа за Key ID (для ефективного decrypt).
- */
-export function findKeyByKeyId(
-    keyId: openpgp.KeyID,
-): openpgp.PrivateKey | undefined {
-    const keyIdHex = keyId.toHex();
-    for (const key of unlockedKeys.values()) {
-        const allKeyIds = [
-            key.getKeyID().toHex(),
-            ...key.getSubkeys().map((sk) => sk.getKeyID().toHex()),
-        ];
-        if (allKeyIds.includes(keyIdHex)) return key;
-    }
-    return undefined;
-}
-
-export function hasAnyUnlockedKey(): boolean {
-    return unlockedKeys.size > 0;
-}
-
-export function clearAllUnlockedKeys(): void {
-    unlockedKeys.clear();
-}
-
-/**
- * Alias для зворотної сумісності.
- */
-export function clearSessionCache(): void {
-    clearAllUnlockedKeys();
-}
+// ─────────────────────────────────────────────────────────────
+//  Vault State
+// ─────────────────────────────────────────────────────────────
 
 /**
  * Перевірка реального стану vault.
- * Оскільки ключі тільки в RAM, наявність ключів = vault розблокований.
  * Синхронна — Map.size є синхронною властивістю.
  */
 export function isVaultActuallyUnlocked(): boolean {
-    return hasAnyUnlockedKey();
+    return unlockedKeys.size > 0;
+}
+
+/** Очищує всі ключі з пам'яті (lock vault). */
+export function clearSessionCache(): void {
+    unlockedKeys.clear();
 }
