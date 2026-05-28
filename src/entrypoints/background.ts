@@ -109,6 +109,11 @@ async function decryptAndVerifyVaultKey(
     );
 
     const privateKey = await openpgp.readPrivateKey({ armoredKey });
+    if (privateKey.keyPacket.version !== 6) {
+        throw new Error(
+            `Only v6 keys supported. Got v${privateKey.keyPacket.version}`,
+        );
+    }
     assertUnprotectedPrivateKey(privateKey);
 
     const matchesEmail = privateKey.users.some(
@@ -309,14 +314,37 @@ async function handleDecryptMessage(
             throw new Error("Message has no encryption key IDs");
         }
 
-        const decryptionKeys = encryptionKeyIds
+        const WILDCARD_HEX = new Set(["0000000000000000", "00000000"]);
+        const hasWildcard = encryptionKeyIds.some((id) =>
+            WILDCARD_HEX.has(id.toHex()),
+        );
+
+        const matchedKeys = encryptionKeyIds
             .map((id) => findPrivateKeyById(id, snapshot))
             .filter((k): k is openpgp.PrivateKey => !!k);
+
+        const decryptionKeys = [...matchedKeys];
+
+        if (hasWildcard) {
+            // Якщо є Wildcard, додаємо ВСІ інші розблоковані ключі з кешу.
+            // OpenPGP.js безпечно перебере їх для KEM-дешифрування.
+            const matchedFingerprints = new Set(
+                decryptionKeys.map((k) => k.getFingerprint()),
+            );
+
+            for (const key of snapshot.values()) {
+                if (!matchedFingerprints.has(key.getFingerprint())) {
+                    decryptionKeys.push(key);
+                }
+            }
+        }
 
         if (decryptionKeys.length === 0) {
             throw new VaultError(
                 VaultErrorCode.NO_MATCHING_KEY,
-                "You don't have a private key that can decrypt this message",
+                encryptionKeyIds.length === 0
+                    ? "Message is not encrypted to a PGP key (symmetric-only encryption is not supported)."
+                    : "You don't have a private key that can decrypt this message",
             );
         }
 
@@ -342,9 +370,25 @@ async function handleDecryptMessage(
 
 async function loadAllPublicKeys(): Promise<openpgp.Key[]> {
     const records = await db.publicKeys.toArray();
-    return Promise.all(
+
+    const results = await Promise.allSettled(
         records.map((r) => openpgp.readKey({ armoredKey: r.armoredKey })),
     );
+
+    return results
+        .filter((r, index): r is PromiseFulfilledResult<openpgp.Key> => {
+            if (r.status === "rejected") {
+                if (import.meta.env.DEV) {
+                    console.warn(
+                        `[MailShroud] Skipping corrupted public key for ${records[index].email}:`,
+                        r.reason,
+                    );
+                }
+                return false;
+            }
+            return true;
+        })
+        .map((r) => r.value);
 }
 
 async function verifySignatures(
