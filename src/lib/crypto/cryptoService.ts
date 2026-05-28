@@ -4,10 +4,10 @@ import * as openpgp from "openpgp";
 //  Constants
 // ─────────────────────────────────────────────────────────────
 
-const PBKDF2_ITERATIONS = 600_000; // OWASP 2024 recommendation
+const PBKDF2_ITERATIONS = 600_000; // OWASP 2024
 const AES_KEY_LENGTH = 256;
-const IV_LENGTH = 12; // 96-bit IV for AES-GCM
-const SALT_LENGTH = 32; // 256-bit salt
+const IV_LENGTH = 12; // 96-bit AES-GCM
+const SALT_LENGTH = 32; // 256-bit
 
 const OPENPGP_CONFIG = {
     v6Keys: true,
@@ -273,7 +273,7 @@ export function getEmailFromKey(key: openpgp.Key): string | undefined {
 
 function bufferToBase64(buffer: Uint8Array): string {
     // Chunk-based approach for large buffers
-    const CHUNK_SIZE = 0x8000; // 32KB chunks
+    const CHUNK_SIZE = 0x8000; // 32KB
     let binary = "";
     for (let i = 0; i < buffer.length; i += CHUNK_SIZE) {
         const chunk = buffer.subarray(i, i + CHUNK_SIZE);

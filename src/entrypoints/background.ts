@@ -859,7 +859,6 @@ async function handleChangeMasterPassword(
         const newSalt = generateSalt();
         const newCryptoKey = await deriveKey(newPassword, newSalt);
 
-        // ✅ Беремо IV з результату шифрування
         const { encryptedData, iv: newIv } = await encryptPrivateKey(
             armoredKey,
             newCryptoKey,
