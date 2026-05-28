@@ -3,7 +3,6 @@ import Dexie, { type Table } from "dexie";
 // ─────────────────────────────────────────────────────────────
 //  Records
 // ─────────────────────────────────────────────────────────────
-
 export interface PrivateKeyRecord {
     email: string;
     encryptedArmoredKey: string;
@@ -46,7 +45,6 @@ export interface SettingRecord {
 // ─────────────────────────────────────────────────────────────
 //  Constants
 // ─────────────────────────────────────────────────────────────
-
 /** v6 fingerprint = 32 bytes = 64 hex chars (тільки v6!) */
 const V6_FINGERPRINT_LENGTH = 64;
 const BASE64_REGEX =
@@ -54,39 +52,36 @@ const BASE64_REGEX =
 const PGP_PUBLIC_KEY_HEADER = "-----BEGIN PGP PUBLIC KEY BLOCK-----";
 
 // ─────────────────────────────────────────────────────────────
-//  Validators
+//  Validators (Тільки для створення нових записів!)
 // ─────────────────────────────────────────────────────────────
-
 function validatePrivateKey(obj: Partial<PrivateKeyRecord>): void {
-    if (!obj.email?.includes("@")) {
-        throw new Error("Invalid email format");
-    }
+    if (!obj.email?.includes("@")) throw new Error("Invalid email format");
     if (
         !obj.keyFingerprint ||
         obj.keyFingerprint.length !== V6_FINGERPRINT_LENGTH
     ) {
         throw new Error(
-            `Invalid v6 fingerprint length: ${obj.keyFingerprint?.length}. Expected ${V6_FINGERPRINT_LENGTH} hex chars.`,
+            `Invalid v6 fingerprint length. Expected ${V6_FINGERPRINT_LENGTH} hex chars.`,
         );
     }
-    if (!BASE64_REGEX.test(obj.encryptedArmoredKey ?? "")) {
+    if (
+        !obj.encryptedArmoredKey ||
+        !BASE64_REGEX.test(obj.encryptedArmoredKey)
+    ) {
         throw new Error("Invalid encrypted key format (not base64)");
     }
 }
 
 function validatePublicKey(obj: Partial<PublicKeyRecord>): void {
-    if (!obj.armoredKey?.includes(PGP_PUBLIC_KEY_HEADER)) {
+    if (!obj.armoredKey?.includes(PGP_PUBLIC_KEY_HEADER))
         throw new Error("Invalid armored public key");
-    }
-    if (!obj.email?.includes("@")) {
-        throw new Error("Invalid email format");
-    }
+    if (!obj.email?.includes("@")) throw new Error("Invalid email format");
     if (
         !obj.keyFingerprint ||
         obj.keyFingerprint.length !== V6_FINGERPRINT_LENGTH
     ) {
         throw new Error(
-            `Invalid v6 fingerprint length: ${obj.keyFingerprint?.length}. Expected ${V6_FINGERPRINT_LENGTH} hex chars.`,
+            `Invalid v6 fingerprint length. Expected ${V6_FINGERPRINT_LENGTH} hex chars.`,
         );
     }
 }
@@ -94,7 +89,6 @@ function validatePublicKey(obj: Partial<PublicKeyRecord>): void {
 // ─────────────────────────────────────────────────────────────
 //  Database
 // ─────────────────────────────────────────────────────────────
-
 export class MailShroudDB extends Dexie {
     privateKeys!: Table<PrivateKeyRecord, string>;
     publicKeys!: Table<PublicKeyRecord, string>;
@@ -109,20 +103,51 @@ export class MailShroudDB extends Dexie {
             settings: "&key",
         });
 
-        // захист від silent corruption
+        // ── creating: Валідуємо повний об'єкт ──
         this.privateKeys.hook("creating", (_pk, obj) =>
             validatePrivateKey(obj),
         );
-        this.privateKeys.hook("updating", (mods) => {
-            if (Object.keys(mods).length > 0) {
-                validatePrivateKey(mods as Partial<PrivateKeyRecord>);
+        this.publicKeys.hook("creating", (_pk, obj) => validatePublicKey(obj));
+
+        // ── updating: Валідуємо ТІЛЬКИ поля, які змінюються (Partial Update) ──
+        // ✅ Явна анотація типу Partial<...Record> вирішує помилку "Property does not exist on type 'Object'"
+        this.privateKeys.hook("updating", (mods: Partial<PrivateKeyRecord>) => {
+            if (mods.email !== undefined && !mods.email.includes("@")) {
+                throw new Error("Invalid email format");
+            }
+            if (
+                mods.keyFingerprint !== undefined &&
+                mods.keyFingerprint.length !== V6_FINGERPRINT_LENGTH
+            ) {
+                throw new Error(
+                    `Invalid v6 fingerprint length: ${mods.keyFingerprint.length}. Expected ${V6_FINGERPRINT_LENGTH} hex chars.`,
+                );
+            }
+            if (
+                mods.encryptedArmoredKey !== undefined &&
+                !BASE64_REGEX.test(mods.encryptedArmoredKey)
+            ) {
+                throw new Error("Invalid encrypted key format (not base64)");
             }
         });
 
-        this.publicKeys.hook("creating", (_pk, obj) => validatePublicKey(obj));
-        this.publicKeys.hook("updating", (mods) => {
-            if (Object.keys(mods).length > 0) {
-                validatePublicKey(mods as Partial<PublicKeyRecord>);
+        this.publicKeys.hook("updating", (mods: Partial<PublicKeyRecord>) => {
+            if (
+                mods.armoredKey !== undefined &&
+                !mods.armoredKey.includes(PGP_PUBLIC_KEY_HEADER)
+            ) {
+                throw new Error("Invalid armored public key");
+            }
+            if (mods.email !== undefined && !mods.email.includes("@")) {
+                throw new Error("Invalid email format");
+            }
+            if (
+                mods.keyFingerprint !== undefined &&
+                mods.keyFingerprint.length !== V6_FINGERPRINT_LENGTH
+            ) {
+                throw new Error(
+                    `Invalid v6 fingerprint length: ${mods.keyFingerprint.length}. Expected ${V6_FINGERPRINT_LENGTH} hex chars.`,
+                );
             }
         });
     }

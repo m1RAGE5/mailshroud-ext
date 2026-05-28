@@ -6,7 +6,6 @@ import {
     decryptPrivateKey,
     encryptPrivateKey,
     generateSalt,
-    generateIV,
     generateKeyPair,
     initOpenPGP,
     cacheUnlockedKey,
@@ -108,21 +107,19 @@ async function decryptAndVerifyVaultKey(
         cryptoKey,
         record.email,
     );
-    try {
-        const privateKey = await openpgp.readPrivateKey({ armoredKey });
-        assertUnprotectedPrivateKey(privateKey);
 
-        const matchesEmail = privateKey.users.some(
-            (u) =>
-                u.userID?.email?.toLowerCase() === record.email.toLowerCase(),
-        );
-        if (!matchesEmail) {
-            throw new Error(`Key does not contain email: ${record.email}`);
-        }
-        return privateKey;
-    } finally {
-        armoredKey = "";
+    const privateKey = await openpgp.readPrivateKey({ armoredKey });
+    assertUnprotectedPrivateKey(privateKey);
+
+    const matchesEmail = privateKey.users.some(
+        (u) => u.userID?.email?.toLowerCase() === record.email.toLowerCase(),
+    );
+
+    if (!matchesEmail) {
+        throw new Error(`Key does not contain email: ${record.email}`);
     }
+
+    return privateKey;
 }
 
 /** Тільки розшифрувати vault-запис до armored-строки (без валідації) */
@@ -388,7 +385,11 @@ async function handleEncryptMessage(
     senderEmail?: string,
 ): Promise<EncryptMessageResult> {
     try {
+        if (text.length > MAX_MESSAGE_SIZE)
+            throw new Error("Message too large (max 1MB)");
+
         await openpgpReady;
+
         if (recipientEmails.length === 0)
             throw new Error("No recipients specified");
 
@@ -717,9 +718,8 @@ async function handleGenerateKeyPair(params: {
 
     // Шифрування приватного ключа майстер-паролем
     const salt = generateSalt();
-    const iv = generateIV();
     const cryptoKey = await deriveKey(params.masterPassword, salt);
-    const { encryptedData } = await encryptPrivateKey(
+    const { encryptedData, iv } = await encryptPrivateKey(
         privateKey,
         cryptoKey,
         emailLower,
@@ -783,7 +783,6 @@ async function handleChangeMasterPassword(
     const allKeys = await db.privateKeys.toArray();
     if (allKeys.length === 0) return;
 
-    // Крок 1: розшифрувати ВСІ ключі старим паролем (валідація current)
     const decryptedArmored: Array<{
         record: (typeof allKeys)[number];
         armoredKey: string;
@@ -797,8 +796,7 @@ async function handleChangeMasterPassword(
             );
             decryptedArmored.push({ record, armoredKey });
         } catch {
-            // Очистити вже розшифровані перед помилкою
-            for (const d of decryptedArmored) d.armoredKey = "";
+            decryptedArmored.length = 0;
             throw new VaultError(
                 VaultErrorCode.INVALID_PASSWORD,
                 "Current master password is incorrect",
@@ -806,7 +804,6 @@ async function handleChangeMasterPassword(
         }
     }
 
-    // Крок 2: перешифрувати ВСІ новим паролем
     const updates: Array<{
         email: string;
         encryptedArmoredKey: string;
@@ -814,29 +811,27 @@ async function handleChangeMasterPassword(
         iv: string;
     }> = [];
 
-    try {
-        for (const { record, armoredKey } of decryptedArmored) {
-            const newSalt = generateSalt();
-            const newIv = generateIV();
-            const newCryptoKey = await deriveKey(newPassword, newSalt);
-            const { encryptedData } = await encryptPrivateKey(
-                armoredKey,
-                newCryptoKey,
-                record.email,
-            );
-            updates.push({
-                email: record.email,
-                encryptedArmoredKey: encryptedData,
-                salt: newSalt,
-                iv: newIv,
-            });
-        }
-    } finally {
-        // Очистити plaintext з пам'яті
-        for (const d of decryptedArmored) d.armoredKey = "";
+    for (const { record, armoredKey } of decryptedArmored) {
+        const newSalt = generateSalt();
+        const newCryptoKey = await deriveKey(newPassword, newSalt);
+
+        // ✅ Беремо IV з результату шифрування
+        const { encryptedData, iv: newIv } = await encryptPrivateKey(
+            armoredKey,
+            newCryptoKey,
+            record.email,
+        );
+
+        updates.push({
+            email: record.email,
+            encryptedArmoredKey: encryptedData,
+            salt: newSalt,
+            iv: newIv,
+        });
     }
 
-    // Крок 3: атомарно оновити БД
+    decryptedArmored.length = 0;
+
     await db.transaction("rw", db.privateKeys, async () => {
         for (const u of updates) {
             await db.privateKeys.update(u.email, {
@@ -844,11 +839,10 @@ async function handleChangeMasterPassword(
                 salt: u.salt,
                 iv: u.iv,
                 updatedAt: Date.now(),
-            }); 
+            });
         }
     });
 
-    // Крок 4: примусовий re-lock (заставити користувача увійти з новим паролем)
     handleLockVault();
     console.log("[MailShroud] Master password changed successfully");
 }

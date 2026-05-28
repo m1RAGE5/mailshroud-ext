@@ -259,10 +259,6 @@ export function generateSalt(): string {
     return bufferToHex(crypto.getRandomValues(new Uint8Array(SALT_LENGTH)));
 }
 
-export function generateIV(): string {
-    return bufferToHex(crypto.getRandomValues(new Uint8Array(IV_LENGTH)));
-}
-
 // ─────────────────────────────────────────────────────────────
 //  Key Utilities
 // ─────────────────────────────────────────────────────────────

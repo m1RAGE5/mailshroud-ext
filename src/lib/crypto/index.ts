@@ -8,7 +8,6 @@ export {
     encryptPrivateKey,
     decryptPrivateKey,
     generateSalt,
-    generateIV,
     getEmailFromKey,
 } from "./cryptoService";
 
