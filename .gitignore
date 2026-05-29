@@ -13,7 +13,7 @@ stats.html
 stats-*.json
 .wxt
 web-ext.config.ts
-
+.chrome-dev-profile/
 .prettier*
 
 # Editor directories and files

@@ -12,10 +12,12 @@
         "zip": "wxt zip",
         "zip:firefox": "wxt zip -b firefox",
         "check": "svelte-check --tsconfig ./tsconfig.json",
-        "postinstall": "wxt prepare"
+        "postinstall": "wxt prepare",
+        "clean-sw": "rm -rf .chrome-dev-profile/Default/Service\\ Worker"
     },
     "devDependencies": {
         "@tsconfig/svelte": "^5.0.8",
+        "@types/jquery": "^4.0.0",
         "@wxt-dev/module-svelte": "^2.0.4",
         "svelte": "^5.53.7",
         "svelte-check": "^4.4.4",

@@ -4,7 +4,6 @@ import { defineConfig } from "wxt";
 export default defineConfig({
     srcDir: "src",
     modules: ["@wxt-dev/module-svelte"],
-
     manifest: ({ browser }) => ({
         name: "MailShroud",
         description: "End-to-End Encryption for Gmail via OpenPGP (RFC 9580)",
@@ -50,12 +49,11 @@ export default defineConfig({
         // ── Web Accessible Resources (для OpenPGP.js WASM) ────
         web_accessible_resources: [
             {
-                resources: ["*.wasm"],
+                resources: ["gmail-bridge.js"],
                 matches: ["*://mail.google.com/*", "*://*.gmail.com/*"],
             },
         ],
     }),
-
     // ── Vite Configuration ─────────────────────────────────────
     vite: () => ({
         build: {

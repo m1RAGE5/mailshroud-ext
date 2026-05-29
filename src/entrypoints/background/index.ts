@@ -1,6 +1,7 @@
 import { defineExtensionMessaging } from "@webext-core/messaging";
 import { db } from "~/lib/db";
 import { isVaultActuallyUnlocked, clearSessionCache } from "~/lib/crypto";
+import { messenger } from "~/lib/messaging";
 import { stopKeepAlive } from "~/lib/security/vaultKeepAlive";
 import { VaultError, VaultErrorCode } from "~/lib/types/error";
 import type { MailShroudMessages } from "~/lib/types/messages";
@@ -23,8 +24,6 @@ import {
     handleGenerateKeyPair,
     handleExportRevocationCertificate,
 } from "./keys";
-
-const messenger = defineExtensionMessaging<MailShroudMessages>();
 
 // ─────────────────────────────────────────────────────────────
 //  Entrypoint
