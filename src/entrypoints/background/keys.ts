@@ -30,27 +30,27 @@ import {
 
 export async function handleStorePrivateKey(
     email: string,
-    encryptedArmoredKey: string,
+    encryptedKeyBase64: string,
     salt: string,
     iv: string,
     masterPassword: string,
 ): Promise<StorePrivateKeyResult> {
     if (!email.includes("@")) throw new Error("Invalid email format");
-    if (!RE_BASE64.test(encryptedArmoredKey))
+    if (!RE_BASE64.test(encryptedKeyBase64))
         throw new Error("Invalid base64 format");
     if (!RE_SALT.test(salt))
         throw new Error("Invalid salt: expected 64 hex chars");
     if (!RE_IV.test(iv)) throw new Error("Invalid iv: expected 24 hex chars");
 
     const privateKey = await decryptAndVerifyVaultKey(
-        { email, encryptedArmoredKey, salt, iv },
+        { email, encryptedKeyBase64, salt, iv },
         masterPassword,
     );
     const fingerprint = privateKey.getFingerprint();
 
     await db.privateKeys.put({
         email,
-        encryptedArmoredKey,
+        encryptedKeyBase64,
         salt,
         iv,
         keyFingerprint: fingerprint,
@@ -75,7 +75,7 @@ export async function handleGetPublicKey(
 export async function handleStorePublicKey(
     email: string,
     armoredKey: string,
-    source: "wkd" | "hkp" | "autocrypt" | "manual" | "key-gossip" = "manual",
+    source: "manual" = "manual",
     verified = false,
 ): Promise<void> {
     const validatedKey = await validatePublicKey(armoredKey, email);
@@ -180,7 +180,7 @@ export async function handleGenerateKeyPair(params: {
         async () => {
             await db.privateKeys.add({
                 email: emailLower,
-                encryptedArmoredKey: encryptedData,
+                encryptedKeyBase64: encryptedData,
                 salt,
                 iv,
                 keyFingerprint: privKeyObj.getFingerprint(),

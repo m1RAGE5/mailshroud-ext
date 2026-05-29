@@ -95,7 +95,7 @@ const PURIFY_HTML_CONFIG: Config = {
     // Безпечні протоколи для href/src (блокує javascript:, vbscript:, data:)
     ALLOWED_URI_REGEXP:
         /^(?:(?:https?|mailto|ftp|tel|sms):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
-    ADD_ATTR: ["target"],
+    ADD_ATTR: ["target", "rel"],
     FORBID_ATTR: [
         "style",
         "background",
@@ -130,54 +130,34 @@ const PURIFY_HTML_CONFIG: Config = {
 //  Public API
 // ─────────────────────────────────────────────────────────────
 
-/**
- * Очищує розшифрований HTML від шкідливого вмісту.
- * Захист від EFAIL-атак (CSS exfiltration, CFB malleability) та XSS.
- *
- * ВИКЛИКАЄТЬСЯ В CONTENT SCRIPT ПЕРЕД ВСТАВКОЮ В DOM.
- */
-export function sanitizeDecryptedHtml(rawHtml: string): string {
-    if (!rawHtml || typeof rawHtml !== "string") return "";
+DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+    if (node.tagName === "A") {
+        node.setAttribute("target", "_blank");
+        node.setAttribute("rel", "noopener noreferrer");
 
-    const clean = DOMPurify.sanitize(rawHtml, PURIFY_HTML_CONFIG);
-
-    // Додатковий pass: примусово додаємо rel="noopener noreferrer" до всіх зовнішніх посилань
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(clean, "text/html");
-
-    doc.querySelectorAll("a").forEach((link) => {
-        // Безпечний target для всіх посилань
-        link.setAttribute("target", "_blank");
-
-        // Об'єднати існуючі rel-значення з noopener/noreferrer
-        const existingRel = link.getAttribute("rel") ?? "";
-        const relValues = new Set(
-            existingRel.toLowerCase().split(/\s+/).filter(Boolean),
-        );
-        relValues.add("noopener");
-        relValues.add("noreferrer");
-        link.setAttribute("rel", Array.from(relValues).join(" "));
-
-        // Блокувати mailto: з body/cc/bcc параметрами (potential exfiltration vector)
-        const href = link.getAttribute("href") ?? "";
+        // Блокування підозрілих mailto
+        const href = node.getAttribute("href") ?? "";
         if (
             href.toLowerCase().startsWith("mailto:") &&
             /[?&](body|cc|bcc)=/i.test(href)
         ) {
-            link.removeAttribute("href");
-            link.setAttribute("title", "[Blocked: suspicious mailto link]");
+            node.removeAttribute("href");
+            node.setAttribute("title", "[Blocked: suspicious mailto link]");
         }
-    });
-
-    // Видалити img без src або з data: URI (tracking pixels)
-    doc.querySelectorAll("img").forEach((img) => {
-        const src = img.getAttribute("src") ?? "";
+    }
+    // Видалення трекінгових пікселів
+    if (node.tagName === "IMG") {
+        const src = node.getAttribute("src") ?? "";
         if (!src || src.trim().toLowerCase().startsWith("data:")) {
-            img.remove();
+            node.remove();
         }
-    });
+    }
+});
 
-    return doc.body.innerHTML;
+export function sanitizeDecryptedHtml(rawHtml: string): string {
+    if (!rawHtml || typeof rawHtml !== "string") return "";
+    // Тепер одного виклику достатньо, хук зробить решту
+    return DOMPurify.sanitize(rawHtml, PURIFY_HTML_CONFIG);
 }
 
 /**

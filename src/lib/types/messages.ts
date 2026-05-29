@@ -54,7 +54,7 @@ export interface KeyInfo {
 /** Параметри для збереження приватного ключа */
 export interface StorePrivateKeyParams {
     email: string;
-    encryptedArmoredKey: string;
+    encryptedKeyBase64: string;
     salt: string;
     iv: string;
     masterPassword: string;
@@ -85,7 +85,7 @@ export interface ChangeMasterPasswordParams {
 export interface StorePublicKeyParams {
     email: string;
     armoredKey: string;
-    source?: "wkd" | "hkp" | "autocrypt" | "manual" | "key-gossip";
+    source?: "manual";
     verified?: boolean;
 }
 

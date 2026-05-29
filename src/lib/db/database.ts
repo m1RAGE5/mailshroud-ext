@@ -5,7 +5,7 @@ import Dexie, { type Table } from "dexie";
 // ─────────────────────────────────────────────────────────────
 export interface PrivateKeyRecord {
     email: string;
-    encryptedArmoredKey: string;
+    encryptedKeyBase64: string;
     salt: string;
     iv: string;
     keyFingerprint: string;
@@ -13,18 +13,11 @@ export interface PrivateKeyRecord {
     updatedAt: number;
 }
 
-export type PublicKeySource =
-    | "wkd"
-    | "hkp"
-    | "autocrypt"
-    | "manual"
-    | "key-gossip";
-
 export interface PublicKeyRecord {
     email: string;
     armoredKey: string;
     keyFingerprint: string;
-    source: PublicKeySource;
+    source: "manual";
     verified: boolean;
     createdAt: number;
     lastUsedAt?: number;
@@ -64,10 +57,7 @@ function validatePrivateKey(obj: Partial<PrivateKeyRecord>): void {
             `Invalid v6 fingerprint length. Expected ${V6_FINGERPRINT_LENGTH} hex chars.`,
         );
     }
-    if (
-        !obj.encryptedArmoredKey ||
-        !BASE64_REGEX.test(obj.encryptedArmoredKey)
-    ) {
+    if (!obj.encryptedKeyBase64 || !BASE64_REGEX.test(obj.encryptedKeyBase64)) {
         throw new Error("Invalid encrypted key format (not base64)");
     }
 }
@@ -124,8 +114,8 @@ export class MailShroudDB extends Dexie {
                 );
             }
             if (
-                mods.encryptedArmoredKey !== undefined &&
-                !BASE64_REGEX.test(mods.encryptedArmoredKey)
+                mods.encryptedKeyBase64 !== undefined &&
+                !BASE64_REGEX.test(mods.encryptedKeyBase64)
             ) {
                 throw new Error("Invalid encrypted key format (not base64)");
             }

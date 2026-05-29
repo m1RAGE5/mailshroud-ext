@@ -75,7 +75,7 @@ export function findPublicKeyById(
 export async function decryptAndVerifyVaultKey(
     record: {
         email: string;
-        encryptedArmoredKey: string;
+        encryptedKeyBase64: string;
         salt: string;
         iv: string;
     },
@@ -83,7 +83,7 @@ export async function decryptAndVerifyVaultKey(
 ): Promise<openpgp.PrivateKey> {
     const cryptoKey = await deriveKey(masterPassword, record.salt);
     const armoredKey = await decryptPrivateKey(
-        record.encryptedArmoredKey,
+        record.encryptedKeyBase64,
         record.iv,
         cryptoKey,
         record.email,
@@ -113,7 +113,7 @@ export async function decryptAndVerifyVaultKey(
 export async function decryptVaultToArmored(
     record: {
         email: string;
-        encryptedArmoredKey: string;
+        encryptedKeyBase64: string;
         salt: string;
         iv: string;
     },
@@ -121,7 +121,7 @@ export async function decryptVaultToArmored(
 ): Promise<string> {
     const cryptoKey = await deriveKey(masterPassword, record.salt);
     return decryptPrivateKey(
-        record.encryptedArmoredKey,
+        record.encryptedKeyBase64,
         record.iv,
         cryptoKey,
         record.email,

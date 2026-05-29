@@ -128,7 +128,7 @@ export async function handleUnlockVault(
 async function unlockSingleKey(
     record: {
         email: string;
-        encryptedArmoredKey: string;
+        encryptedKeyBase64: string;
         salt: string;
         iv: string;
     },
@@ -192,7 +192,7 @@ export async function handleChangeMasterPassword(
 
     const updates: Array<{
         email: string;
-        encryptedArmoredKey: string;
+        encryptedKeyBase64: string;
         salt: string;
         iv: string;
     }> = [];
@@ -209,7 +209,7 @@ export async function handleChangeMasterPassword(
 
         updates.push({
             email: record.email,
-            encryptedArmoredKey: encryptedData,
+            encryptedKeyBase64: encryptedData,
             salt: newSalt,
             iv: newIv,
         });
@@ -220,7 +220,7 @@ export async function handleChangeMasterPassword(
     await db.transaction("rw", db.privateKeys, async () => {
         for (const u of updates) {
             await db.privateKeys.update(u.email, {
-                encryptedArmoredKey: u.encryptedArmoredKey,
+                encryptedKeyBase64: u.encryptedKeyBase64,
                 salt: u.salt,
                 iv: u.iv,
                 updatedAt: Date.now(),

@@ -91,7 +91,7 @@ function setupMessageHandlers(): void {
     messenger.onMessage("storePrivateKey", async (m) => {
         const {
             email,
-            encryptedArmoredKey,
+            encryptedKeyBase64,
             salt,
             iv,
             masterPassword,
@@ -111,7 +111,7 @@ function setupMessageHandlers(): void {
 
         return handleStorePrivateKey(
             emailLower,
-            encryptedArmoredKey,
+            encryptedKeyBase64,
             salt,
             iv,
             masterPassword,
@@ -135,7 +135,7 @@ function setupMessageHandlers(): void {
         handleStorePublicKey(
             m.data.email,
             m.data.armoredKey,
-            m.data.source,
+            m.data.source ?? "manual",
             m.data.verified,
         ),
     );
