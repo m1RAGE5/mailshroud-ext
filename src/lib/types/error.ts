@@ -4,9 +4,9 @@
 
 export enum VaultErrorCode {
     // Auth / Vault state
-    LOCKED = "VAULT_LOCKED",
+    VAULT_LOCKED = "VAULT_LOCKED",
     INVALID_PASSWORD = "INVALID_PASSWORD",
-    RATE_LIMITED = "VAULT_RATE_LIMITED",
+    RATE_LIMITED = "RATE_LIMITED",
 
     // Data integrity
     CORRUPTED_DATA = "CORRUPTED_DATA",

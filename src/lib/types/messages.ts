@@ -20,7 +20,6 @@ export interface StorePrivateKeyResult {
 export interface GenerateKeyPairResult {
     privateKeyFingerprint: string;
     publicKeyArmored: string;
-    revocationCertificate: string;
     email: string;
 }
 
@@ -61,6 +60,11 @@ export interface StorePrivateKeyParams {
     forceOverwrite?: boolean;
 }
 
+export interface ExportPrivateKeyParams {
+    email: string;
+    masterPassword?: string;
+}
+
 /** Параметри для шифрування повідомлення */
 export interface EncryptMessageParams {
     text: string;
@@ -72,7 +76,7 @@ export interface EncryptMessageParams {
 export interface GenerateKeyPairParams {
     email: string;
     name?: string;
-    masterPassword: string;
+    masterPassword?: string;
 }
 
 /** Параметри для зміни master password */
@@ -106,16 +110,17 @@ export interface MailShroudMessages {
     isVaultUnlocked: () => Promise<boolean>;
     changeMasterPassword: (params: ChangeMasterPasswordParams) => Promise<void>;
 
-    // ── Private keys ──────────────────────────────────────
-    storePrivateKey: (
-        params: StorePrivateKeyParams,
-    ) => Promise<StorePrivateKeyResult>;
     generateKeyPair: (
         params: GenerateKeyPairParams,
     ) => Promise<GenerateKeyPairResult>;
+
+    // ── Private keys ──────────────────────────────────────
+    exportPrivateKey: (params: ExportPrivateKeyParams) => Promise<string>;
+    storePrivateKey: (
+        params: StorePrivateKeyParams,
+    ) => Promise<StorePrivateKeyResult>;
     listPrivateKeys: () => Promise<KeyInfo[]>;
     deletePrivateKey: (email: string) => Promise<void>;
-    exportRevocationCertificate: (email: string) => Promise<string | null>;
 
     // ── Public keys ───────────────────────────────────────
     getPublicKey: (email: string) => Promise<string | null>;

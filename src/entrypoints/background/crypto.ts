@@ -34,7 +34,10 @@ export async function handleDecryptMessage(
 ): Promise<DecryptMessageResult> {
     try {
         if (!isVaultActuallyUnlocked()) {
-            throw new VaultError(VaultErrorCode.LOCKED, "Vault is locked.");
+            throw new VaultError(
+                VaultErrorCode.VAULT_LOCKED,
+                "Vault is locked.",
+            );
         }
         if (armoredText.length > MAX_MESSAGE_SIZE) {
             throw new Error("Message too large (max 1MB)");

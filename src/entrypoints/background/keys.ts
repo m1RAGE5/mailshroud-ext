@@ -3,10 +3,14 @@ import { db } from "~/lib/db";
 import {
     deriveKey,
     encryptPrivateKey,
+    decryptPrivateKey,
     generateSalt,
     generateKeyPair,
     validatePublicKey,
     removeCachedUnlockedKey,
+    getSessionPassword,
+    setSessionPassword,
+    cacheUnlockedKey,
 } from "~/lib/crypto";
 import type {
     StorePrivateKeyResult,
@@ -23,6 +27,10 @@ import {
     RE_SALT,
     RE_IV,
 } from "./helpers";
+
+// Для auto-lock при ініціалізації сесії
+import { refreshAutoLock } from "./vault";
+import { startKeepAlive } from "~/lib/security/vaultKeepAlive";
 
 // ─────────────────────────────────────────────────────────────
 //  Store private key
@@ -122,12 +130,22 @@ export async function handleListPublicKeys(): Promise<KeyInfo[]> {
 
 export async function handleDeletePrivateKey(email: string): Promise<void> {
     const emailLower = email.toLowerCase();
-    await db.transaction("rw", db.privateKeys, db.settings, async () => {
-        await db.privateKeys.delete(emailLower);
-        await db.settings.delete(`revocation:${emailLower}`);
-    });
+
+    await db.transaction(
+        "rw",
+        db.privateKeys,
+        db.publicKeys,
+        db.settings,
+        async () => {
+            await db.privateKeys.delete(emailLower);
+            await db.publicKeys.delete(emailLower);
+        },
+    );
+
     removeCachedUnlockedKey(emailLower);
-    console.log(`[MailShroud] Private key deleted for ${emailLower}`);
+    console.log(
+        `[MailShroud] Private key and associated public key deleted for ${emailLower}`,
+    );
 }
 
 export async function handleDeletePublicKey(email: string): Promise<void> {
@@ -138,14 +156,14 @@ export async function handleDeletePublicKey(email: string): Promise<void> {
 // ─────────────────────────────────────────────────────────────
 //  Generate key pair
 // ─────────────────────────────────────────────────────────────
-
 export async function handleGenerateKeyPair(params: {
     email: string;
     name?: string;
-    masterPassword: string;
+    masterPassword?: string;
 }): Promise<GenerateKeyPairResult> {
     await openpgpReady;
     const emailLower = params.email.toLowerCase();
+
     const existing = await db.privateKeys.get(emailLower);
     if (existing) {
         throw new VaultError(
@@ -154,20 +172,30 @@ export async function handleGenerateKeyPair(params: {
         );
     }
 
-    // Генерація v6 ключа (curve25519 + AEAD)
-    const { privateKey, publicKey, revocationCertificate } =
-        await generateKeyPair(emailLower, params.name);
+    // ── ВИЗНАЧАЄМО МАЙСТЕР-ПАРОЛЬ ─────────────────────────────
+    const masterPassword = params.masterPassword || getSessionPassword();
+    if (!masterPassword) {
+        throw new VaultError(
+            VaultErrorCode.VAULT_LOCKED,
+            "Vault is locked. Unlock it from the popup before generating keys.",
+        );
+    }
 
-    // Шифрування приватного ключа майстер-паролем
+    // Генерація v6 ключа (curve25519 + AEAD)
+    const { privateKey, publicKey } = await generateKeyPair(
+        emailLower,
+        params.name,
+    );
+
+    // Шифрування приватного ключа майстер-паролем (AES-GCM)
     const salt = generateSalt();
-    const cryptoKey = await deriveKey(params.masterPassword, salt);
+    const cryptoKey = await deriveKey(masterPassword, salt);
     const { encryptedData, iv } = await encryptPrivateKey(
         privateKey,
         cryptoKey,
         emailLower,
     );
 
-    // Читання для fingerprint-ів
     const privKeyObj = await openpgp.readPrivateKey({ armoredKey: privateKey });
     const pubKeyObj = await openpgp.readKey({ armoredKey: publicKey });
 
@@ -178,7 +206,7 @@ export async function handleGenerateKeyPair(params: {
         db.publicKeys,
         db.settings,
         async () => {
-            await db.privateKeys.add({
+            await db.privateKeys.put({
                 email: emailLower,
                 encryptedKeyBase64: encryptedData,
                 salt,
@@ -188,7 +216,7 @@ export async function handleGenerateKeyPair(params: {
                 updatedAt: Date.now(),
             });
 
-            await db.publicKeys.add({
+            await db.publicKeys.put({
                 email: emailLower,
                 armoredKey: publicKey,
                 keyFingerprint: pubKeyObj.getFingerprint(),
@@ -196,32 +224,59 @@ export async function handleGenerateKeyPair(params: {
                 verified: true, // self-generated = trusted
                 createdAt: Date.now(),
             });
-
-            // Revocation certificate зберігається окремо в settings
-            await db.settings.put({
-                key: `revocation:${emailLower}`,
-                value: revocationCertificate,
-            });
         },
     );
+
+    // ── ІНІЦІАЛІЗАЦІЯ СЕСІЇ (тільки при створенні ПЕРШОГО ключа) ──
+    if (params.masterPassword && !getSessionPassword()) {
+        setSessionPassword(params.masterPassword);
+        cacheUnlockedKey(emailLower, privKeyObj);
+        refreshAutoLock();
+        startKeepAlive();
+        console.log("[MailShroud] Vault session initialized with first key");
+    } else {
+        // Vault вже був розблокований — просто додаємо новий ключ у кеш
+        cacheUnlockedKey(emailLower, privKeyObj);
+        refreshAutoLock();
+    }
 
     return {
         privateKeyFingerprint: privKeyObj.getFingerprint(),
         publicKeyArmored: publicKey,
-        revocationCertificate,
         email: emailLower,
     };
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Export revocation certificate
-// ─────────────────────────────────────────────────────────────
+export async function handleExportPrivateKey(params: {
+    email: string;
+    masterPassword?: string;
+}): Promise<string> {
+    await openpgpReady;
+    const emailLower = params.email.toLowerCase();
 
-export async function handleExportRevocationCertificate(
-    email: string,
-): Promise<string | null> {
-    const emailLower = email.toLowerCase();
-    const record = await db.settings.get(`revocation:${emailLower}`);
-    if (!record || typeof record.value !== "string") return null;
-    return record.value;
+    const record = await db.privateKeys.get(emailLower);
+    if (!record) {
+        throw new Error("Приватний ключ для цього email не знайдено");
+    }
+
+    const password = params.masterPassword || getSessionPassword();
+    if (!password) {
+        throw new VaultError(VaultErrorCode.VAULT_LOCKED, "Vault заблоковано");
+    }
+
+    try {
+        const cryptoKey = await deriveKey(password, record.salt);
+        const armoredPrivateKey = await decryptPrivateKey(
+            record.encryptedKeyBase64,
+            record.iv,
+            cryptoKey,
+            emailLower,
+        );
+        return armoredPrivateKey;
+    } catch (err) {
+        throw new VaultError(
+            VaultErrorCode.INVALID_PASSWORD,
+            "Невірний майстер-пароль. Доступ відхилено.",
+        );
+    }
 }

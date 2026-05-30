@@ -46,7 +46,7 @@ export default defineConfig({
                 "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
         },
 
-        // ── Web Accessible Resources (для OpenPGP.js WASM) ────
+        // ── Web Accessible Resources ────
         web_accessible_resources: [
             {
                 resources: ["gmail-bridge.js"],
@@ -59,6 +59,11 @@ export default defineConfig({
         build: {
             // OpenPGP.js має великий bundle — збільшуємо chunk size warning limit
             chunkSizeWarningLimit: 1000,
+        },
+        server: {
+            watch: {
+                ignored: ["**/.chrome-dev-profile/**", "**/.wxt/**"],
+            },
         },
     }),
 });

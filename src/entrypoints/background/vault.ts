@@ -7,6 +7,7 @@ import {
     cacheUnlockedKey,
     clearSessionCache,
     isVaultActuallyUnlocked,
+    setSessionPassword,
 } from "~/lib/crypto";
 import type { UnlockResult } from "~/lib/types/messages";
 import {
@@ -113,6 +114,8 @@ export async function handleUnlockVault(
     }
 
     if (unlockedCount > 0) {
+        // ВИПРАВЛЕННЯ: Зберігаємо пароль у пам'яті сесії після успішного розблокування
+        setSessionPassword(masterPassword);
         scheduleAutoLock();
         startKeepAlive();
     }
@@ -228,6 +231,7 @@ export async function handleChangeMasterPassword(
         }
     });
 
-    handleLockVault();
+    // Після зміни пароля просто оновлюємо його в сесії (щоб не блокувати користувача)
+    setSessionPassword(newPassword);
     console.log("[MailShroud] Master password changed successfully");
 }

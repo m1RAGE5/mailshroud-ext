@@ -22,7 +22,7 @@ import {
     handleDeletePrivateKey,
     handleDeletePublicKey,
     handleGenerateKeyPair,
-    handleExportRevocationCertificate,
+    handleExportPrivateKey,
 } from "./keys";
 
 // ─────────────────────────────────────────────────────────────
@@ -124,8 +124,8 @@ function setupMessageHandlers(): void {
     messenger.onMessage("deletePrivateKey", (m) =>
         handleDeletePrivateKey(m.data),
     );
-    messenger.onMessage("exportRevocationCertificate", (m) =>
-        handleExportRevocationCertificate(m.data),
+    messenger.onMessage("exportPrivateKey", (m) =>
+        handleExportPrivateKey(m.data),
     );
 
     // ── Public keys ────────────────────────────────────────

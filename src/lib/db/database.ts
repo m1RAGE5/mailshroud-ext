@@ -27,8 +27,7 @@ export type SettingsKey =
     | "autoLockMinutes"
     | "preferredKeyServer"
     | "wkdEnabled"
-    | "hkEnabled"
-    | `revocation:${string}`;
+    | "hkEnabled";
 
 export interface SettingRecord {
     key: SettingsKey;

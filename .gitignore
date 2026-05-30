@@ -7,19 +7,20 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-.output
+node_modules/
+.output/
 stats.html
 stats-*.json
-.wxt
+.wxt/
 web-ext.config.ts
 .chrome-dev-profile/
+.chrome-dev-profile2/
 .prettier*
 
 # Editor directories and files
-.vscode
-.idea
-.DS_Store
+.vscode/
+.idea/
+.DS_Store/
 *.suo
 *.ntvs*
 *.njsproj

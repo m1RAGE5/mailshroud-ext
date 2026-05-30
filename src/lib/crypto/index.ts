@@ -18,4 +18,6 @@ export {
     removeCachedUnlockedKey,
     clearSessionCache,
     isVaultActuallyUnlocked,
+    getSessionPassword,
+    setSessionPassword,
 } from "./sessionState";

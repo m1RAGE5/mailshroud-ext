@@ -1,13 +1,26 @@
 import * as openpgp from "openpgp";
 
 /**
- * In-memory сховище розблокованих приватних ключів.
+ * In-memory сховище розблокованих приватних ключів та сесійного пароля.
  * Живе тільки поки Service Worker активний.
  * При termination SW — автоматично очищується (природній auto-lock).
- *
- * Ключі Map — завжди email у нижньому регістрі.
  */
 const unlockedKeys = new Map<string, openpgp.PrivateKey>();
+
+// Тимчасове зберігання майстер-пароля для шифрування НОВИХ ключів під час активної сесії
+let sessionMasterPassword: string | null = null;
+
+// ─────────────────────────────────────────────────────────────
+//  Session Password Operations
+// ─────────────────────────────────────────────────────────────
+
+export function setSessionPassword(password: string): void {
+    sessionMasterPassword = password;
+}
+
+export function getSessionPassword(): string | null {
+    return sessionMasterPassword;
+}
 
 // ─────────────────────────────────────────────────────────────
 //  Cache Operations
@@ -41,13 +54,13 @@ export function getAllCachedKeys(): Map<string, openpgp.PrivateKey> {
 
 /**
  * Перевірка реального стану vault.
- * Синхронна — Map.size є синхронною властивістю.
  */
 export function isVaultActuallyUnlocked(): boolean {
-    return unlockedKeys.size > 0;
+    return unlockedKeys.size > 0 || sessionMasterPassword !== null;
 }
 
-/** Очищує всі ключі з пам'яті (lock vault). */
+/** Очищує всі ключі з пам'яті та стирає майстер-пароль (lock vault). */
 export function clearSessionCache(): void {
     unlockedKeys.clear();
+    sessionMasterPassword = null;
 }

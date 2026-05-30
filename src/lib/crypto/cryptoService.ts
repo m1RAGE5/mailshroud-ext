@@ -37,7 +37,6 @@ export async function generateKeyPair(
 ): Promise<{
     privateKey: string;
     publicKey: string;
-    revocationCertificate: string;
 }> {
     const result = await openpgp.generateKey({
         type: "curve25519",
@@ -52,7 +51,6 @@ export async function generateKeyPair(
     return {
         privateKey: result.privateKey,
         publicKey: result.publicKey,
-        revocationCertificate: result.revocationCertificate,
     };
 }
 
