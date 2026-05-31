@@ -187,6 +187,17 @@ export async function handleEncryptMessage(
         const signingKey = pickSigningKey(senderEmail);
         const signingKeys = signingKey ? [signingKey] : [];
 
+        if (signingKey) {
+            const senderPubKey = signingKey.toPublic();
+            const isAlreadyIncluded = encryptionKeys.some(
+                (k) => k.getFingerprint() === senderPubKey.getFingerprint(),
+            );
+
+            if (!isAlreadyIncluded) {
+                encryptionKeys.push(senderPubKey);
+            }
+        }
+
         const encrypted = await openpgp.encrypt({
             message: await openpgp.createMessage({ text }),
             encryptionKeys,

@@ -46,8 +46,6 @@ let genError = $state('');
 let isGenerating = $state(false);
 
 // ── Імпорт приватного ключа ────────────────────────
-// Увага: MailShroud приймає ТІЛЬКИ ключі БЕЗ passphrase
-// (шифрування робиться AES-GCM vault-ом, а не OpenPGP passphrase)
 let importKeyBlock = $state('');
 let importEmail = $state('');
 let importMasterPassword = $state('');
@@ -63,6 +61,26 @@ let isAddingContact = $state(false);
 // ── Toast ──────────────────────────────────────────
 let toastMessage = $state('');
 let toastType = $state < 'success' | 'error' | 'info' > ('success');
+
+// ── Керування замилюванням відбитків (Svelte 5 state) ──
+let revealedFingerprints = $state(new Set < string > ());
+
+function toggleFingerprint(fp: string) {
+    if (revealedFingerprints.has(fp)) {
+        revealedFingerprints.delete(fp);
+    } else {
+        revealedFingerprints.add(fp);
+    }
+    revealedFingerprints = new Set(revealedFingerprints); // Оновлюємо посилання для реактивності
+}
+
+// Функція для примусового замилювання назад
+function hideFingerprint(fp: string) {
+    if (revealedFingerprints.has(fp)) {
+        revealedFingerprints.delete(fp);
+        revealedFingerprints = new Set(revealedFingerprints);
+    }
+}
 
 function showToast(msg: string, type: 'success' | 'error' | 'info' = 'success') {
     toastMessage = msg;
@@ -83,7 +101,6 @@ async function refreshData() {
             messenger.sendMessage('listPublicKeys', undefined),
         ]);
         myKeys = priv;
-        // Контакти = публічні ключі, що НЕ належать нам
         const ownEmails = new Set(priv.map(k => k.email.toLowerCase()));
         contacts = pub.filter(k => !ownEmails.has(k.email.toLowerCase()));
     } catch (err) {
@@ -101,7 +118,6 @@ onMount(async () => {
 //  Утиліти
 // ────────────────────────────────────────────────────
 function formatFingerprint(fp: string): string {
-    // v6 fingerprint = 64 hex chars → групуємо по 4
     return fp.toUpperCase().match(/.{1,4}/g)?.join(' ') ?? fp;
 }
 
@@ -139,12 +155,8 @@ function extractError(err: unknown, fallback: string): string {
     return err instanceof Error ? err.message : fallback;
 }
 
-// ────────────────────────────────────────────────────
-//  Генерація ключа
-// ────────────────────────────────────────────────────
 const handleGenerateKey = async () => {
     genError = '';
-
     if (!isVaultUnlocked) {
         genError = 'Сховище заблоковане. Розблокуйте його через popup.';
         return;
@@ -167,12 +179,10 @@ const handleGenerateKey = async () => {
             email: newKeyEmail.trim(),
             name: newKeyName.trim(),
         });
-
         showToast(
             `Ключ згенеровано. Відбиток: ${result.privateKeyFingerprint.slice(0, 16)}…`,
             'success'
         );
-
         newKeyName = '';
         newKeyEmail = '';
         isGenModalOpen = false;
@@ -184,13 +194,6 @@ const handleGenerateKey = async () => {
     }
 };
 
-// ────────────────────────────────────────────────────
-//  Імпорт приватного ключа
-//  (тут спрощено: реальний flow вимагає попереднього
-//   розшифрування armored-key на стороні UI через OpenPGP.js,
-//   шифрування його AES-GCM з master-password і відправки у background.
-//   Для MVP показуємо тільки валідацію формату)
-// ────────────────────────────────────────────────────
 const handleImportKey = async () => {
     importError = '';
     if (!importKeyBlock.includes('-----BEGIN PGP PRIVATE KEY BLOCK-----')) {
@@ -203,11 +206,6 @@ const handleImportKey = async () => {
     }
     isImporting = true;
     try {
-        // ⚠️ Для повноцінного імпорту потрібен окремий endpoint,
-        // який приймає armored private key без passphrase,
-        // шифрує його AES-GCM з masterPassword і кладе в БД.
-        // Наразі використовуємо storePrivateKey з підготовленими даними.
-        // TODO: реалізувати handleImportArmoredPrivateKey у background.
         importError = 'Імпорт приватних ключів ще не реалізовано. Використовуйте генерацію.';
     } catch (err) {
         importError = extractError(err, 'Помилка імпорту');
@@ -216,7 +214,6 @@ const handleImportKey = async () => {
     }
 };
 
-// ── Безпечний експорт приватного ключа ────────────────────────
 let isExportPrivModalOpen = $state(false);
 let exportPrivEmail = $state('');
 let exportPrivPassword = $state('');
@@ -239,13 +236,10 @@ const handleExportPrivateKeySubmit = async () => {
 
     isExportingPriv = true;
     try {
-        // Відправляємо запит у background з паролем
         const armoredPrivateKey = await messenger.sendMessage('exportPrivateKey', {
             email: exportPrivEmail,
             masterPassword: exportPrivPassword
         });
-
-        // Скачуємо файл на ПК
         downloadAsFile(`private_key_${exportPrivEmail}.asc`, armoredPrivateKey);
         showToast('Приватний ключ успішно експортовано! Зберігайте його в таємниці.', 'success');
         isExportPrivModalOpen = false;
@@ -256,9 +250,6 @@ const handleExportPrivateKeySubmit = async () => {
     }
 };
 
-// ────────────────────────────────────────────────────
-//  Додавання контакту (public key)
-// ────────────────────────────────────────────────────
 const handleAddContact = async () => {
     contactError = '';
     if (!contactEmail.trim() || !contactKeyBlock.trim()) {
@@ -289,9 +280,6 @@ const handleAddContact = async () => {
     }
 };
 
-// ────────────────────────────────────────────────────
-//  Видалення
-// ────────────────────────────────────────────────────
 const startDelete = (type: 'key' | 'contact', email: string) => {
     deleteTarget = {
         type,
@@ -318,9 +306,6 @@ const confirmDelete = async () => {
     }
 };
 
-// ────────────────────────────────────────────────────
-//  Експорт public key
-// ────────────────────────────────────────────────────
 const exportPublicKey = async (email: string) => {
     try {
         const armored = await messenger.sendMessage('getPublicKey', email);
@@ -333,9 +318,6 @@ const exportPublicKey = async (email: string) => {
     }
 };
 
-// ────────────────────────────────────────────────────
-//  Копіювання public key
-// ────────────────────────────────────────────────────
 const copyPublicKey = async (email: string) => {
     try {
         const armored = await messenger.sendMessage('getPublicKey', email);
@@ -359,6 +341,7 @@ const copyPublicKey = async (email: string) => {
                 <p>Панель керування PGP-шифруванням</p>
             </div>
         </div>
+
         <div class="header-version">
             {#if isVaultUnlocked}
             <span class="status-badge unlocked">● Vault відкритий</span>
@@ -414,7 +397,7 @@ const copyPublicKey = async (email: string) => {
             <div class="panel-header">
                 <div class="panel-title">
                     <h2>Ваші PGP-ключі</h2>
-                    <p>Приватні ключі зберігаються зашифrovano. Відбиток — це публічний ідентифікатор.</p>
+                    <p>Приватні ключі зберігаються зашифровано. Відбиток — це публічний ідентифікатор.</p>
                 </div>
                 <div class="panel-actions">
                     <button type="button" onclick={() => isGenModalOpen = true} class="btn btn-primary">
@@ -440,8 +423,12 @@ const copyPublicKey = async (email: string) => {
                                 <span class="tag tag-blue">v6</span>
                                 <span class="tag tag-gray">{formatDate(key.createdAt)}</span>
                             </div>
-                            <p class="card-fingerprint" title="Повний відбиток">
-                                🔐 {formatFingerprint(key.fingerprint)}
+                            <p class="card-fingerprint {revealedFingerprints.has(key.fingerprint) ? '' : 'blurred'}"
+                                title={revealedFingerprints.has(key.fingerprint) ? "Повний відбиток" : "Натисніть, щоб показати відбиток"}
+                                onclick={() => toggleFingerprint(key.fingerprint)}
+                                onmouseleave={() => hideFingerprint(key.fingerprint)}
+                                role="presentation">
+                                {formatFingerprint(key.fingerprint)}
                             </p>
                         </div>
                         <div class="card-actions">
@@ -454,7 +441,7 @@ const copyPublicKey = async (email: string) => {
                                 Експорт public
                             </button>
                             <button type="button" class="btn-icon" style="border-color: #fbcfe8; color: #db2777;" onclick={() => openExportPrivModal(key.email)}>
-                                🔑 Експорт private
+                                Експорт private
                             </button>
                             <button type="button" class="btn-delete"
                                 onclick={() => startDelete('key', key.email)}>
@@ -468,7 +455,6 @@ const copyPublicKey = async (email: string) => {
             {/if}
 
             {:else}
-            <!-- КОНТАКТИ -->
             <div class="panel-header">
                 <div class="panel-title">
                     <h2>Публічні ключі контактів</h2>
@@ -508,14 +494,22 @@ const copyPublicKey = async (email: string) => {
                                 {#if c.verified}<span class="tag tag-green">✓ verified</span>{/if}
                                 <span class="tag tag-gray">{formatDate(c.createdAt)}</span>
                             </div>
-                            <p class="card-fingerprint">
-                                🔐 {formatFingerprint(c.fingerprint)}
+                            <p class="card-fingerprint {revealedFingerprints.has(c.fingerprint) ? '' : 'blurred'}"
+                                title={revealedFingerprints.has(c.fingerprint) ? "Відбиток" : "Натисніть, щоб показати відбиток"}
+                                onclick={() => toggleFingerprint(c.fingerprint)}
+                                onmouseleave={() => hideFingerprint(c.fingerprint)}
+                                role="presentation">
+                                {formatFingerprint(c.fingerprint)}
                             </p>
                         </div>
                         <div class="card-actions">
                             <button type="button" class="btn-icon"
-                                onclick={() => copyToClipboard(c.fingerprint, 'Відбиток скопійовано')}>
-                                Копіювати FP
+                                onclick={() => copyPublicKey(c.email)}>
+                                Копіювати public
+                            </button>
+                            <button type="button" class="btn-icon"
+                                onclick={() => exportPublicKey(c.email)}>
+                                Експорт public
                             </button>
                             <button type="button" class="btn-delete"
                                 onclick={() => startDelete('contact', c.email)}>
@@ -532,7 +526,6 @@ const copyPublicKey = async (email: string) => {
     </main>
 </div>
 
-<!-- ═══ МОДАЛЬНІ ВІКНА ═══ -->
 {#if isGenModalOpen || isImportModalOpen || isContactModalOpen || isConfirmDeleteOpen || isExportPrivModalOpen}
 <div class="modal-overlay" onclick={() => {
     isGenModalOpen = false;
@@ -560,8 +553,6 @@ const copyPublicKey = async (email: string) => {
             <input id="nk-email" type="email" bind:value={newKeyEmail}
                 placeholder="you@gmail.com" required />
         </div>
-
-        <!-- ❌ ПОЛЕ МАЙСТЕР-ПАРОЛЯ ПРИБРАНО -->
 
         {#if genError}
         <p class="error-msg">{genError}</p>
@@ -646,7 +637,6 @@ const copyPublicKey = async (email: string) => {
 {/if}
 
 <style>
-/* ... ваші стилі без змін + нові ... */
 :global(html),
 :global(body) {
     margin: 0;
@@ -811,7 +801,7 @@ const copyPublicKey = async (email: string) => {
     margin-bottom: 24px;
 }
 
-.panel-title h2 {
+.panel-header h2 {
     margin: 0;
     font-size: 28px;
 }
@@ -979,6 +969,17 @@ const copyPublicKey = async (email: string) => {
     font-family: monospace;
     user-select: all;
     word-break: break-all;
+}
+
+.card-fingerprint.blurred {
+    filter: blur(5px);
+    cursor: pointer;
+    user-select: none;
+    transition: filter 0.2s ease-in-out;
+}
+
+.card-fingerprint:not(.blurred) {
+    transition: filter 0.2s ease-in-out;
 }
 
 .card-actions {
