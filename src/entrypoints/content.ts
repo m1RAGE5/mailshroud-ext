@@ -21,7 +21,6 @@ export default defineContentScript({
 
         // 2. Комунікація з Main World (gmail-bridge.ts)
         window.addEventListener("message", async (event) => {
-            // 🔒 БЕЗПЕКА: Перевірка походження повідомлення
             if (
                 event.source !== window ||
                 event.origin !== "https://mail.google.com"
@@ -75,7 +74,7 @@ export default defineContentScript({
                             error: "Не знайдено жодного валідного отримувача",
                         },
                     },
-                    "https://mail.google.com", // 🔒 БЕЗПЕКА: targetOrigin
+                    "https://mail.google.com",
                 );
                 return;
             }
@@ -97,7 +96,7 @@ export default defineContentScript({
                             encrypted: result.encrypted,
                         },
                     },
-                    "https://mail.google.com", // 🔒 БЕЗПЕКА: targetOrigin
+                    "https://mail.google.com",
                 );
             } catch (err: any) {
                 console.error("[MailShroud] Encryption failed:", err);

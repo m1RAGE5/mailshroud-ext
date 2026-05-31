@@ -14,7 +14,7 @@ import {
 } from '~/lib/types/error';
 
 // ── Стан Vault ──────────────────────────────────────
-let hasVault = $state < boolean | null > (null); // чи є хоч 1 приватний ключ у БД
+let hasVault = $state < boolean | null > (null);
 let isVaultUnlocked = $state(false);
 let isLoading = $state(true);
 
@@ -34,18 +34,14 @@ let genName = $state('');
 let genEmail = $state('');
 let genError = $state('');
 let isGenerating = $state(false);
-// Зберігаємо master-password у closure, щоб підписати ключ
 let _masterPassword: string | null = null;
 
 // ────────────────────────────────────────────────────
-//  Ініціалізація: перевіряємо стан vault
+//  Ініціалізація
 // ────────────────────────────────────────────────────
 onMount(async () => {
     try {
-        // 1) Чи розблоковано зараз?
         isVaultUnlocked = await messenger.sendMessage('isVaultUnlocked', undefined);
-
-        // 2) Чи є хоч один приватний ключ у БД?
         const keys = await messenger.sendMessage('listPrivateKeys', undefined);
         hasVault = keys.length > 0;
     } catch (err) {
@@ -56,9 +52,6 @@ onMount(async () => {
     }
 });
 
-// ────────────────────────────────────────────────────
-//  Навігація до Options
-// ────────────────────────────────────────────────────
 const openOptions = () => {
     if (browser.runtime.openOptionsPage) {
         browser.runtime.openOptionsPage();
@@ -67,10 +60,6 @@ const openOptions = () => {
     }
 };
 
-// ────────────────────────────────────────────────────
-//  Створення Vault = генерація першого ключа
-//  (master-password задається тут і одразу створюється key pair)
-// ────────────────────────────────────────────────────
 const submitCreateVault = async () => {
     vaultError = '';
     if (vaultPassword.length < 8) {
@@ -84,11 +73,8 @@ const submitCreateVault = async () => {
 
     isCreating = true;
     try {
-        // Запитуємо ім'я та email для першого ключа
-        // (у цьому UX-сценарії генеруємо одразу після створення Vault)
         _masterPassword = vaultPassword;
-        // Переходимо у стан "немає ключів" — користувач побачить форму генерації
-        hasVault = true; // "Vault створено" (формально — пароль заданий)
+        hasVault = true;
         isVaultUnlocked = true;
         vaultPassword = '';
         vaultConfirmPassword = '';
@@ -99,9 +85,6 @@ const submitCreateVault = async () => {
     }
 };
 
-// ────────────────────────────────────────────────────
-//  Розблокування існуючого Vault
-// ────────────────────────────────────────────────────
 const submitUnlock = async () => {
     unlockError = '';
     if (!unlockPassword) return;
@@ -109,15 +92,12 @@ const submitUnlock = async () => {
     isUnlocking = true;
     try {
         const result = await messenger.sendMessage('unlockVault', unlockPassword);
-
         if (result.success) {
             isVaultUnlocked = true;
             _masterPassword = unlockPassword;
             unlockPassword = '';
         } else {
-            unlockError = result.failedEmails.length > 0 ?
-                `Не вдалося розблокувати ключі: ${result.failedEmails.join(', ')}` :
-                'Не вдалося розблокувати жоден ключ';
+            unlockError = 'Невірний пароль';
         }
     } catch (err) {
         unlockError = extractErrorMessage(err, 'Невірний пароль або помилка розблокування');
@@ -126,9 +106,6 @@ const submitUnlock = async () => {
     }
 };
 
-// ────────────────────────────────────────────────────
-//  Генерація PGP key pair (v6, curve25519)
-// ────────────────────────────────────────────────────
 const submitGenerate = async () => {
     genError = '';
     if (!genName.trim() || !genEmail.trim()) {
@@ -163,9 +140,6 @@ const submitGenerate = async () => {
     }
 };
 
-// ────────────────────────────────────────────────────
-//  Блокування
-// ────────────────────────────────────────────────────
 const handleLock = async () => {
     try {
         await messenger.sendMessage('lockVault', undefined);
@@ -175,17 +149,14 @@ const handleLock = async () => {
     }
 };
 
-// ────────────────────────────────────────────────────
-//  Утиліта: дістати зрозуміле повідомлення з VaultError
-// ────────────────────────────────────────────────────
 function extractErrorMessage(err: unknown, fallback: string): string {
     if (err instanceof VaultError) {
-        // Код → зрозумілий текст для користувача
         const map: Partial < Record < VaultErrorCode, string >> = {
             INVALID_PASSWORD: 'Невірний майстер-пароль',
             VAULT_LOCKED: 'Сховище заблоковане',
             RATE_LIMITED: `Забагато спроб. Спробуйте пізніше${
-                    err.retryAfterMs ? ` (${Math.ceil(err.retryAfterMs / 1000)} с)` : ''
+                    err.retryAfterMs ?
+                    ` (${Math.ceil(err.retryAfterMs / 1000)} с)` : ''
                 }`,
             KEY_ALREADY_EXISTS: 'Ключ для цієї пошти вже існує',
             CORRUPTED_DATA: 'Дані сховища пошкоджено',
@@ -220,25 +191,23 @@ const handleImageError = (e: Event) => {
 
     <main>
         {#if isLoading}
-        <!-- Завантаження -->
         <div class="state-container">
             <div class="loader"></div>
             <p>Завантаження...</p>
         </div>
 
         {:else if !hasVault}
-        <!-- Стан 1: Немає Vault — створюємо майстер-пароль -->
         <div class="form-container fade-in">
-            <div class="icon-shield text-center">
-                <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24"
+            <div class="icon-shield">
+                <svg xmlns="http://www.w3.org/2000/svg" width="42" height="42" viewBox="0 0 24 24"
                     fill="none" stroke="currentColor" stroke-width="1.5"
-                    stroke-linecap="round" stroke-linejoin="round" style="margin: 0 auto;">
+                    stroke-linecap="round" stroke-linejoin="round">
                     <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
                 </svg>
             </div>
             <h2 class="text-center">Вітаємо в MailShroud!</h2>
             <p class="subtitle text-center">
-                Створіть надійний майстер-пароль (мін. 8 символів). Він шифрує ваші PGP-ключі локально (AES-256-GCM).
+                Створіть надійний пароль (мін. 8 символів). Він шифрує ваші ключі локально (AES-256-GCM).
             </p>
             <form onsubmit={(e) => { e.preventDefault(); submitCreateVault(); }}>
                 <div class="input-group">
@@ -257,16 +226,16 @@ const handleImageError = (e: Event) => {
                 <p class="error-text mt-2">{vaultError}</p>
                 {/if}
                 <button type="submit" class="btn btn-primary mt-2" disabled={isCreating}>
-                    {isCreating ? 'Створення...' : 'Створити сховище'}
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="btn-icon-svg"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    <span>{isCreating ? 'Створення...' : 'Створити сховище'}</span>
                 </button>
             </form>
         </div>
 
         {:else if !isVaultUnlocked}
-        <!-- Стан 2: Vault існує, але ЗАБЛОКОВАНИЙ -->
         <div class="state-container fade-in">
             <div class="icon-lock">
-                <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24"
+                <svg xmlns="http://www.w3.org/2000/svg" width="42" height="42" viewBox="0 0 24 24"
                     fill="none" stroke="currentColor" stroke-width="1.5"
                     stroke-linecap="round" stroke-linejoin="round">
                     <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
@@ -277,24 +246,24 @@ const handleImageError = (e: Event) => {
                 <h2>Сховище ключів</h2>
                 <div class="status-dot locked" title="Заблоковано"></div>
             </div>
-            <p>Введіть ваш майстер-пароль для розблокування.</p>
+            <p>Введіть ваш пароль для розблокування.</p>
             <form onsubmit={(e) => { e.preventDefault(); submitUnlock(); }} style="width: 100%;">
                 <div class="input-group">
                     <input type="password" bind:value={unlockPassword}
-                        placeholder="Майстер-пароль" required minlength="8"
+                        placeholder="Пароль від сховища" required minlength="8"
                         disabled={isUnlocking} />
                 </div>
                 {#if unlockError}
                 <p class="error-text mt-2">{unlockError}</p>
                 {/if}
-                <button type="submit" class="btn btn-primary mt-2" disabled={isUnlocking}>
-                    {isUnlocking ? 'Розблокування...' : 'Розблокувати'}
+                <button type="submit" class="btn btn-primary" disabled={isUnlocking}>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="btn-icon-svg"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+                    <span>{isUnlocking ? 'Розблокування...' : 'Розблокувати'}</span>
                 </button>
             </form>
         </div>
 
         {:else if hasVault && isVaultUnlocked}
-        <!-- Перевіряємо чи є ключі через listPrivateKeys -->
         {@const keysCheck = (async () => {
         const k = await messenger.sendMessage('listPrivateKeys', undefined);
         return k.length;
@@ -302,11 +271,10 @@ const handleImageError = (e: Event) => {
 
         {#await keysCheck then count}
         {#if count === 0}
-        <!-- Стан 3: Vault розблоковано, але ключів ще немає -->
         <div class="form-container fade-in">
             <h2 class="text-center">Створення першого ключа</h2>
             <p class="subtitle text-center">
-                Ваше сховище готове. Згенеруйте PGP-ключ (v6, Curve25519) для вашої Gmail-адреси.
+                Ваше сховище готове! Згенеруйте пару ключів для власного Gmail.
             </p>
             <form onsubmit={(e) => { e.preventDefault(); submitGenerate(); }}>
                 <div class="input-group">
@@ -323,19 +291,19 @@ const handleImageError = (e: Event) => {
                 <p class="error-text mt-2">{genError}</p>
                 {/if}
                 <button type="submit" class="btn btn-primary mt-2" disabled={isGenerating}>
-                    {isGenerating ? 'Генерація (ECC)...' : 'Згенерувати ключ'}
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="btn-icon-svg"><path d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 1.5 1.5M15.5 7.5 14 6"/></svg>
+                    <span>{isGenerating ? 'Генерація (ECC)...' : 'Згенерувати ключ'}</span>
                 </button>
             </form>
         </div>
         {:else}
-        <!-- Стан 4: Все готово -->
         <div class="state-container fade-in">
-            <div class="icon-lock" style="color: #10b981; background: #ecfdf5;">
-                <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24"
+            <div class="icon-lock unlocked-theme">
+                <svg xmlns="http://www.w3.org/2000/svg" width="42" height="42" viewBox="0 0 24 24"
                     fill="none" stroke="currentColor" stroke-width="1.5"
                     stroke-linecap="round" stroke-linejoin="round">
                     <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                    <path d="M7 11V7a5 5 0 0 1 9.9-1" />
                 </svg>
             </div>
             <div class="vault-title-wrapper">
@@ -343,12 +311,14 @@ const handleImageError = (e: Event) => {
                 <div class="status-dot unlocked" title="Розблоковано"></div>
             </div>
             <p>Активних ключів: <strong>{count}</strong><br/>
-                PGP-шифрування Gmail активне.</p>
+                Шифрування Gmail активне</p>
             <button onclick={handleLock} class="btn btn-secondary mt-2">
-                Заблокувати сховище
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="btn-icon-svg"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                <span>Заблокувати сховище</span>
             </button>
             <button onclick={openOptions} class="btn btn-primary mt-2">
-                Керувати ключами
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="btn-icon-svg"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+                <span>Керувати ключами</span>
             </button>
         </div>
         {/if}
@@ -358,7 +328,6 @@ const handleImageError = (e: Event) => {
 </div>
 
 <style>
-/* ... ваші наявні стилі без змін ... */
 :global(body) {
     margin: 0;
     padding: 0;
@@ -367,7 +336,7 @@ const handleImageError = (e: Event) => {
 
 .container {
     width: 340px;
-    min-height: 440px;
+    min-height: 400px;
     font-family: system-ui, -apple-system, sans-serif;
     background-color: #ffffff;
     color: #1f2937;
@@ -438,6 +407,10 @@ main {
     flex: 1;
 }
 
+.state-container p {
+    font-size: 14px;
+}
+
 .form-container {
     display: flex;
     flex-direction: column;
@@ -453,6 +426,10 @@ h2 {
     font-size: 1.25rem;
     margin: 0 0 10px 0;
     color: #0f172a;
+}
+
+.vault-title-wrapper h2 {
+    margin: 0;
 }
 
 p {
@@ -498,19 +475,33 @@ p {
     text-align: left;
 }
 
+/* Збільшені та пропорційно вирівняні контейнери для іконок головного статусу розширення */
 .icon-shield,
 .icon-lock {
-    color: #3b82f6;
-    margin-bottom: 16px;
-    background: #eff6ff;
-    padding: 16px;
+    margin-bottom: 20px;
+    width: 80px;          /* Збільшено з 64px */
+    height: 80px;         /* Збільшено з 64px */
     border-radius: 50%;
     display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    align-self: center;
+    flex-shrink: 0;
+}
+
+.icon-shield {
+    color: #3b82f6;
+    background: #eff6ff;
 }
 
 .icon-lock {
     color: #ef4444;
     background: #fef2f2;
+}
+
+.unlocked-theme {
+    color: #10b981 !important;
+    background: #ecfdf5 !important;
 }
 
 .input-group {
@@ -554,17 +545,23 @@ input:disabled {
     padding: 10px 16px;
     border: none;
     border-radius: 8px;
-    font-weight: 500;
+    font-weight: 600;
     font-size: 0.875rem;
     cursor: pointer;
     display: inline-flex;
     justify-content: center;
     align-items: center;
+    gap: 8px;
 }
 
 .btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+}
+
+.btn-icon-svg {
+    display: inline-block;
+    flex-shrink: 0;
 }
 
 .btn-primary {

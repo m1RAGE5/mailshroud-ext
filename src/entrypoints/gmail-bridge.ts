@@ -1,33 +1,113 @@
 import $ from "jquery";
 import { defineUnlistedScript } from "#imports";
 
+// Допоміжна функція для створення SVG-вузлів (повністю обходить Trusted Types)
+function createSvgNode(tag: string, attrs: Record<string, string>): SVGElement {
+    const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const key in attrs) {
+        el.setAttribute(key, attrs[key]);
+    }
+    return el;
+}
+
+// Фабрика для чистого програмного збирання іконок без string-парсерів
+function getStatusIcon(
+    type: "success" | "error" | "warn" | "loading",
+): SVGElement {
+    const svg = createSvgNode("svg", {
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": type === "success" ? "3" : "2.5",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        style: "margin-right: 6px; width: 14px; height: 14px; flex-shrink: 0;",
+    });
+
+    if (type === "success") {
+        svg.appendChild(
+            createSvgNode("polyline", { points: "20 6 9 17 4 12" }),
+        );
+    } else if (type === "error") {
+        svg.appendChild(
+            createSvgNode("circle", { cx: "12", cy: "12", r: "10" }),
+        );
+        svg.appendChild(
+            createSvgNode("line", { x1: "15", y1: "9", x2: "9", y2: "15" }),
+        );
+        svg.appendChild(
+            createSvgNode("line", { x1: "9", y1: "9", x2: "15", y2: "15" }),
+        );
+    } else if (type === "warn") {
+        svg.appendChild(
+            createSvgNode("path", {
+                d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z",
+            }),
+        );
+        svg.appendChild(
+            createSvgNode("line", { x1: "12", y1: "9", x2: "12", y2: "13" }),
+        );
+        svg.appendChild(
+            createSvgNode("line", {
+                x1: "12",
+                y1: "17",
+                x2: "12.01",
+                y2: "17",
+            }),
+        );
+    } else if (type === "loading") {
+        svg.appendChild(
+            createSvgNode("circle", {
+                cx: "12",
+                cy: "12",
+                r: "10",
+                "stroke-dasharray": "32",
+                "stroke-dashoffset": "12",
+            }),
+        );
+        svg.appendChild(
+            createSvgNode("animateTransform", {
+                attributeName: "transform",
+                type: "rotate",
+                from: "0 12 12",
+                to: "360 12 12",
+                dur: "1s",
+                repeatCount: "indefinite",
+            }),
+        );
+    }
+    return svg;
+}
+
+const bgColors: Record<string, string> = {
+    success: "#10b981",
+    error: "#ef4444",
+    warn: "#f59e0b",
+    loading: "#3b82f6",
+};
+
 export default defineUnlistedScript(async () => {
-    // 1. Забезпечуємо наявність jQuery у Main World (gmail.js вимагає цього)
     if (!(window as any).jQuery) {
         (window as any).jQuery = $;
         (window as any).$ = $;
     }
 
     try {
-        // 2. Динамічний імпорт Gmail.js
-        // @ts-ignore - gmail.js не має повних ES-модульних типів
+        // @ts-ignore
         const GmailFactory = await import("gmail-js");
         const GmailClass = GmailFactory.default
             ? GmailFactory.default.Gmail
             : (GmailFactory as any).Gmail;
         const gmail = new GmailClass() as any;
 
-        // 3. Map для зберігання compose об'єктів
         const composeMap = new Map<string, any>();
 
-        // 4. Обсервер для нових compose windows
         gmail.observe.on("compose", (compose: any) => {
             const composeId = compose.id();
             composeMap.set(composeId, compose);
             addEncryptButton(compose);
             console.log("[MailShroud] Compose window detected:", composeId);
 
-            // Повідомляємо Content Script про нове вікно
             window.postMessage(
                 {
                     type: "MAILSHROUD_COMPOSE_READY",
@@ -37,21 +117,22 @@ export default defineUnlistedScript(async () => {
             );
         });
 
-        // ✨ ДОДАТКОВА ФУНКЦІЯ: Відображення тимчасового повідомлення над кнопкою
         function showStatus(
             compose: any,
             text: string,
-            isError: boolean = false,
+            type: "success" | "error" | "warn" | "loading",
         ) {
             const container = compose.$el.find(".mailshroud-btn-container");
             if (!container.length) return;
 
-            // Видаляємо попереднє повідомлення, якщо воно ще активне
             container.find(".mailshroud-status-msg").remove();
 
             const statusEl = document.createElement("div");
             statusEl.className = "mailshroud-status-msg";
-            statusEl.textContent = text;
+
+            // Безпечна інжекція іконок та тексту через дерево DOM-нод (Trusted Types Friendly)
+            statusEl.appendChild(getStatusIcon(type));
+            statusEl.appendChild(document.createTextNode(text));
 
             const $status = $(statusEl);
             $status.css({
@@ -60,7 +141,7 @@ export default defineUnlistedScript(async () => {
                 left: "50%",
                 transform: "translateX(-50%)",
                 marginBottom: "8px",
-                background: isError ? "#ef4444" : "#10b981",
+                background: bgColors[type],
                 color: "white",
                 padding: "6px 12px",
                 borderRadius: "4px",
@@ -70,11 +151,12 @@ export default defineUnlistedScript(async () => {
                 whiteSpace: "nowrap",
                 boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
                 pointerEvents: "none",
+                display: "flex",
+                alignItems: "center",
             });
 
             container.append($status);
 
-            // Анімоване зникнення через 2.5 секунди
             setTimeout(() => {
                 $status.fadeOut(300, function () {
                     $(this).remove();
@@ -82,18 +164,15 @@ export default defineUnlistedScript(async () => {
             }, 2500);
         }
 
-        // 5. Функція для додавання кнопки шифрування
         function addEncryptButton(compose: any) {
             const composeEl = compose.$el;
 
-            // Затримка, щоб Gmail встиг відмалювати UI
             setTimeout(() => {
                 const sendButton = composeEl.find(".gU.Up").first();
                 if (
                     sendButton.length &&
                     !composeEl.find(".mailshroud-encrypt-btn").length
                 ) {
-                    // Створюємо ізольований контейнер-обгортку для кнопки та майбутніх повідомлень
                     const containerEl = document.createElement("div");
                     containerEl.className = "mailshroud-btn-container";
                     containerEl.style.position = "relative";
@@ -103,26 +182,31 @@ export default defineUnlistedScript(async () => {
 
                     const btnEl = document.createElement("button");
                     btnEl.className = "mailshroud-encrypt-btn";
-                    btnEl.textContent = "🔒 Шифрувати";
+                    btnEl.textContent = "Шифрувати";
 
                     const encryptBtn = $(btnEl);
                     encryptBtn.css({
-                        padding: "10px 20px",
-                        background: "#10b981",
+                        padding: "9px 20px",
+                        background: "#0db87f",
                         color: "white",
                         border: "none",
-                        borderRadius: "4px",
+                        borderRadius: "18px",
                         cursor: "pointer",
                         fontSize: "14px",
-                        fontWeight: "600",
-                        display: "block", // Займає контейнер повністю
+                        fontWeight: "500",
+                        display: "block",
                     });
 
                     encryptBtn.on("mouseenter", function () {
-                        $(this).css("background", "#059669");
+                        $(this).css("background", "#33bf90");
+                        $(this).css(
+                            "box-shadow",
+                            "0 1px 2px 0 rgba(26, 232, 156, 0.45), 0 1px 3px 1px rgba(26, 232, 156, 0.3)",
+                        );
                     });
                     encryptBtn.on("mouseleave", function () {
-                        $(this).css("background", "#10b981");
+                        $(this).css("background", "#0db87f");
+                        $(this).css("box-shadow", "none");
                     });
                     encryptBtn.on("click", async () => {
                         await handleEncryptClick(compose);
@@ -134,14 +218,11 @@ export default defineUnlistedScript(async () => {
             }, 500);
         }
 
-        // 6. Обробник кліку на кнопку шифрування
         async function handleEncryptClick(compose: any) {
             const composeId = compose.id();
             const btn = compose.$el.find(".mailshroud-encrypt-btn");
-
             const recipientsSet = new Set<string>();
 
-            // 1. Шукаємо всі "чіпи" контактів
             compose.$el.find("[email]").each(function (
                 _index: number,
                 element: HTMLElement,
@@ -152,7 +233,6 @@ export default defineUnlistedScript(async () => {
                 }
             });
 
-            // 2. Додаткова перевірка у прихованих полях вводу
             compose.$el.find('input[type="hidden"]').each(function (
                 _index: number,
                 element: HTMLElement,
@@ -169,42 +249,33 @@ export default defineUnlistedScript(async () => {
 
             const body = compose.body() || "";
             const senderEmail = gmail.get.user_email() || "";
-
             const finalRecipients = Array.from(recipientsSet).filter(
                 (email) => email !== senderEmail.toLowerCase(),
             );
 
-            // Заміна alerts на плавну валідацію в статус-боксах
             if (finalRecipients.length === 0) {
-                showStatus(
-                    compose,
-                    "⚠️ Додайте хоча б одного отримувача",
-                    true,
-                );
+                showStatus(compose, "Додайте хоча б одного одержувача", "warn");
                 return;
             }
 
-            // Очищення від HTML-тегів через регулярні вирази для обходу Trusted Types
             const plainTextCheck = body
                 .replace(/<[^>]+>/g, "")
                 .replace(/&nbsp;/g, " ")
                 .trim();
-
             if (!plainTextCheck) {
                 showStatus(
                     compose,
-                    "⚠️ Введіть текст листа перед шифруванням",
-                    true,
+                    "Введіть текст листа перед шифруванням",
+                    "warn",
                 );
                 return;
             }
 
             if (body.includes("-----BEGIN PGP MESSAGE-----")) {
-                showStatus(compose, "⚠️ Лист вже зашифровано", true);
+                showStatus(compose, "Лист вже зашифровано", "warn");
                 return;
             }
 
-            // Відправляємо запит на шифрування в Content Script
             window.postMessage(
                 {
                     type: "MAILSHROUD_ENCRYPT_REQUEST",
@@ -220,12 +291,10 @@ export default defineUnlistedScript(async () => {
                 "https://mail.google.com",
             );
 
-            // ✨ ЗМІНА: Кнопка не змінює текст, але тимчасово вимикається (захист від double-click)
             btn.prop("disabled", true);
-            showStatus(compose, "⏳ Шифрування...");
+            showStatus(compose, "Шифрування...", "loading");
         }
 
-        // 7. Слухаємо відповіді від Content Script
         window.addEventListener("message", (event) => {
             if (
                 event.source !== window ||
@@ -243,7 +312,7 @@ export default defineUnlistedScript(async () => {
             const btn = compose.$el.find(".mailshroud-encrypt-btn");
 
             if (error) {
-                showStatus(compose, `❌ Помилка: ${error}`, true);
+                showStatus(compose, `Помилка: ${error}`, "error");
                 btn.prop("disabled", false);
             } else {
                 const bodyContainer = compose.$el.find(
@@ -260,14 +329,11 @@ export default defineUnlistedScript(async () => {
                     preElem.textContent = encrypted;
 
                     bodyContainer.appendChild(preElem);
-
-                    // ✨ ЗМІНА: Показуємо успіх зверху, вмикаємо кнопку назад із початковим текстом
-                    showStatus(compose, "✅ Зашифровано успішно!");
+                    showStatus(compose, "Зашифровано успішно!", "success");
                 } else {
                     console.error("[MailShroud] Не знайдено поле вводу");
-                    showStatus(compose, "❌ Помилка вставки в DOM", true);
+                    showStatus(compose, "Помилка вставки в DOM", "error");
                 }
-
                 btn.prop("disabled", false);
             }
         });

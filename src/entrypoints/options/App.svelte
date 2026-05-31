@@ -64,17 +64,13 @@ let toastType = $state < 'success' | 'error' | 'info' > ('success');
 
 // ── Керування замилюванням відбитків (Svelte 5 state) ──
 let revealedFingerprints = $state(new Set < string > ());
-
-function toggleFingerprint(fp: string) {
-    if (revealedFingerprints.has(fp)) {
-        revealedFingerprints.delete(fp);
-    } else {
+function revealFingerprint(fp: string) {
+    if (!revealedFingerprints.has(fp)) {
         revealedFingerprints.add(fp);
+        revealedFingerprints = new Set(revealedFingerprints);
     }
-    revealedFingerprints = new Set(revealedFingerprints); // Оновлюємо посилання для реактивності
 }
 
-// Функція для примусового замилювання назад
 function hideFingerprint(fp: string) {
     if (revealedFingerprints.has(fp)) {
         revealedFingerprints.delete(fp);
@@ -90,9 +86,7 @@ function showToast(msg: string, type: 'success' | 'error' | 'info' = 'success') 
     }, 4000);
 }
 
-// ────────────────────────────────────────────────────
-//  Завантажити все з background
-// ────────────────────────────────────────────────────
+// ── Завантажити все з background ────────────────────
 async function refreshData() {
     try {
         isVaultUnlocked = await messenger.sendMessage('isVaultUnlocked', undefined);
@@ -114,9 +108,7 @@ onMount(async () => {
     isLoading = false;
 });
 
-// ────────────────────────────────────────────────────
-//  Утиліти
-// ────────────────────────────────────────────────────
+// ── Утиліти ─────────────────────────────────────────
 function formatFingerprint(fp: string): string {
     return fp.toUpperCase().match(/.{1,4}/g)?.join(' ') ?? fp;
 }
@@ -124,6 +116,7 @@ function formatFingerprint(fp: string): string {
 function formatDate(ts: number): string {
     return new Date(ts).toISOString().split('T')[0];
 }
+
 async function copyToClipboard(text: string, msg = 'Скопійовано') {
     try {
         await navigator.clipboard.writeText(text);
@@ -143,12 +136,12 @@ function downloadAsFile(filename: string, text: string) {
 function extractError(err: unknown, fallback: string): string {
     if (err instanceof VaultError) {
         const map: Partial < Record < VaultErrorCode, string >> = {
-            INVALID_PASSWORD: 'Невірний майстер-пароль',
+            INVALID_PASSWORD: 'Невірний пароль',
             VAULT_LOCKED: 'Сховище заблоковане. Розблокуйте через popup.',
             RATE_LIMITED: 'Забагато спроб. Зачекайте.',
             KEY_ALREADY_EXISTS: 'Ключ для цієї пошти вже існує',
             CORRUPTED_DATA: 'Дані пошкоджено',
-            NO_MATCHING_KEY: 'Не знайдено відповідного ключа',
+            NO_MATCHING_KEY: 'Не знадено відповідного ключа',
         };
         return map[err.code] ?? err.message;
     }
@@ -201,7 +194,7 @@ const handleImportKey = async () => {
         return;
     }
     if (!importEmail.trim() || !importMasterPassword) {
-        importError = 'Вкажіть email та майстер-пароль';
+        importError = 'Вкажіть email та пароль';
         return;
     }
     isImporting = true;
@@ -230,7 +223,7 @@ const openExportPrivModal = (email: string) => {
 const handleExportPrivateKeySubmit = async () => {
     exportPrivError = '';
     if (!exportPrivPassword) {
-        exportPrivError = 'Введіть майстер-пароль для підтвердження';
+        exportPrivError = 'Введіть пароль сховища для підтвердження';
         return;
     }
 
@@ -287,6 +280,7 @@ const startDelete = (type: 'key' | 'contact', email: string) => {
     };
     isConfirmDeleteOpen = true;
 };
+
 const confirmDelete = async () => {
     if (!deleteTarget) return;
     try {
@@ -311,7 +305,7 @@ const exportPublicKey = async (email: string) => {
         const armored = await messenger.sendMessage('getPublicKey', email);
         if (armored) {
             downloadAsFile(`public_key_${email}.asc`, armored);
-            showToast('Публічний ключ експортовано', 'success');
+            showToast('Відкритий ключ експортовано', 'success');
         }
     } catch (err) {
         showToast(extractError(err, 'Помилка експорту'), 'error');
@@ -322,9 +316,9 @@ const copyPublicKey = async (email: string) => {
     try {
         const armored = await messenger.sendMessage('getPublicKey', email);
         if (armored) {
-            await copyToClipboard(armored, 'Публічний ключ скопійовано');
+            await copyToClipboard(armored, 'Відкритий ключ скопійовано');
         } else {
-            showToast('Публічний ключ не знайдено', 'error');
+            showToast('Відкритий ключ не знайдено', 'error');
         }
     } catch (err) {
         showToast(extractError(err, 'Помилка отримання ключа'), 'error');
@@ -333,197 +327,230 @@ const copyPublicKey = async (email: string) => {
 </script>
 
 <div class="app-container">
-    <header class="app-header">
-        <div class="header-brand">
-            <img src="/icon/logo-48.png" alt="Logo" class="logo-img" />
-            <div class="header-titles">
-                <h1>MailShroud</h1>
-                <p>Панель керування PGP-шифруванням</p>
-            </div>
-        </div>
-
-        <div class="header-version">
-            {#if isVaultUnlocked}
-            <span class="status-badge unlocked">● Vault відкритий</span>
-            {:else}
-            <span class="status-badge locked">● Vault закритий</span>
-            {/if}
-        </div>
-    </header>
-
+    <div class="page-wrapper">
     {#if toastMessage}
     <div class="toast toast-{toastType}">
         <span class="toast-icon">
-            {#if toastType === 'success'} ✓ {:else if toastType === 'error'} ⚠ {:else} ℹ {/if}
+            {#if toastType === 'success'}
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            {:else if toastType === 'error'}
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            {:else}
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            {/if}
         </span>
         <span class="toast-text">{toastMessage}</span>
     </div>
     {/if}
 
-    <main class="app-layout">
-        <aside class="sidebar">
-            <button type="button" class="nav-item {activeTab === 'my-keys' ? 'active' : ''}"
-                onclick={() => activeTab = 'my-keys'}>
-                <div class="nav-label"><span class="nav-icon">🔑</span> Власні ключі</div>
-                <span class="badge">{myKeys.length}</span>
-            </button>
-            <button type="button" class="nav-item {activeTab === 'contacts' ? 'active' : ''}"
-                onclick={() => activeTab = 'contacts'}>
-                <div class="nav-label"><span class="nav-icon">👥</span> Контакти</div>
-                <span class="badge">{contacts.length}</span>
-            </button>
-            <div class="info-panel">
-                <h4>Безпека</h4>
-                <p>Приватні ключі шифруються AES-256-GCM з PBKDF2 (600 000 ітерацій) і ніколи не залишають background.</p>
-                <p>Використовується OpenPGP v6 (Curve25519 + AEAD-GCM).</p>
-            </div>
-        </aside>
-
-        <section class="main-panel">
-            {#if isLoading}
-            <div class="empty-state">
-                <div class="loader"></div>
-                <p>Завантаження...</p>
-            </div>
-
-            {:else if !isVaultUnlocked}
-            <div class="empty-state">
-                <div class="empty-icon">🔒</div>
-                <h3>Vault заблоковано</h3>
-                <p>Розблокуйте сховище через popup-іконку розширення, щоб керувати ключами.</p>
-            </div>
-
-            {:else if activeTab === 'my-keys'}
-            <div class="panel-header">
-                <div class="panel-title">
-                    <h2>Ваші PGP-ключі</h2>
-                    <p>Приватні ключі зберігаються зашифровано. Відбиток — це публічний ідентифікатор.</p>
-                </div>
-                <div class="panel-actions">
-                    <button type="button" onclick={() => isGenModalOpen = true} class="btn btn-primary">
-                        + Згенерувати ключ
-                    </button>
+    <div class="settings-box">
+        <header class="box-header">
+            <div class="header-brand">
+                <img src="/icon/logo-48.png" alt="Logo" class="logo-img" />
+                <div class="header-titles">
+                    <h1>MailShroud</h1>
+                    <p>Керування ключами шифрування Gmail</p>
                 </div>
             </div>
 
-            {#if myKeys.length === 0}
-            <div class="empty-state">
-                <div class="empty-icon">🛡️</div>
-                <h3>У вас немає ключів</h3>
-                <p>Згенеруйте першу PGP-пару для вашої Gmail-адреси.</p>
+            <div class="header-version">
+                {#if isVaultUnlocked}
+                <span class="status-badge unlocked">● Vault відкритий</span>
+                {:else}
+                <span class="status-badge locked">● Vault закритий</span>
+                {/if}
             </div>
-            {:else}
-            <div class="list-container">
-                {#each myKeys as key (key.fingerprint)}
-                <div class="card">
-                    <div class="card-content">
-                        <div class="card-info">
-                            <div class="card-title-row">
-                                <h3>{key.email}</h3>
-                                <span class="tag tag-blue">v6</span>
-                                <span class="tag tag-gray">{formatDate(key.createdAt)}</span>
-                            </div>
-                            <p class="card-fingerprint {revealedFingerprints.has(key.fingerprint) ? '' : 'blurred'}"
+        </header>
+
+        <div class="box-body">
+            <aside class="sidebar">
+                <button type="button" class="nav-item {activeTab === 'my-keys' ? 'active' : ''}"
+                    onclick={() => activeTab = 'my-keys'}>
+                    <div class="nav-label">
+                        <span class="nav-icon">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 1.5 1.5M15.5 7.5 14 6"/></svg>
+                        </span> 
+                        Власні ключі
+                    </div>
+                    <span class="badge">{myKeys.length}</span>
+                </button>
+             
+                <button type="button" class="nav-item {activeTab === 'contacts' ? 'active' : ''}"
+                    onclick={() => activeTab = 'contacts'}>
+                    <div class="nav-label">
+                        <span class="nav-icon">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                        </span> 
+                        Контакти
+                    </div>
+                    <span class="badge">{contacts.length}</span>
+                </button>
+              
+                <div class="info-panel">
+                    <h4>Безпека</h4>
+                    <p>Приватні ключі шифруються AES-256-GCM з PBKDF2 (600 000 ітерацій).</p>
+                    <p>Використовується OpenPGP v6 (Curve25519 + AEAD-GCM).</p>
+                    <p>Відбиток – послідовність байтів, яка використовується для ідентифікації відкритого ключа.</p>
+                </div>
+            </aside>
+
+            <section class="main-panel">
+                {#if isLoading}
+                <div class="empty-state">
+                    <div class="loader"></div>
+                    <p>Завантаження...</p>
+                </div>
+
+                {:else if !isVaultUnlocked}
+                <div class="empty-state">
+                    <div class="empty-icon">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                    </div>
+                    <h3>Сховище заблоковано!</h3>
+                    <p>Розблокуйте його у спливаючому вікні розширення</p>
+                </div>
+
+                {:else if activeTab === 'my-keys'}
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <h2>Власні ключі</h2>
+                        <p>Додавайте власні ключі та діліться відкритими. Закриті (private) ключі зберігаються зашифровано.</p>
+                    </div>
+                    <div class="panel-actions">
+                        <button type="button" onclick={() => isGenModalOpen = true} class="btn btn-primary">
+                            + Згенерувати ключ
+                        </button>
+                    </div>
+                </div>
+
+                {#if myKeys.length === 0}
+                <div class="empty-state">
+                    <div class="empty-icon">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    </div>
+                    <h3>У вас немає ключів</h3>
+                    <p>Згенеруйте першу PGP-пару для вашої Gmail-адреси.</p>
+                </div>
+                {:else}
+                <div class="list-container">
+                    {#each myKeys as key (key.fingerprint)}
+                    <div class="card">
+                        <div class="card-content">
+                            <div class="card-info">
+                                <div class="card-title-row">
+                                    <h3>{key.email}</h3>
+                                    <span class="tag tag-blue">v6</span>
+                                    <span class="tag tag-gray">{formatDate(key.createdAt)}</span>
+                                </div>
+                                <p class="card-fingerprint {revealedFingerprints.has(key.fingerprint) ? '' : 'blurred'}"
                                 title={revealedFingerprints.has(key.fingerprint) ? "Повний відбиток" : "Натисніть, щоб показати відбиток"}
-                                onclick={() => toggleFingerprint(key.fingerprint)}
+                                onclick={() => revealFingerprint(key.fingerprint)}
                                 onmouseleave={() => hideFingerprint(key.fingerprint)}
                                 role="presentation">
                                 {formatFingerprint(key.fingerprint)}
-                            </p>
-                        </div>
-                        <div class="card-actions">
-                            <button type="button" class="btn-icon"
-                                onclick={() => copyPublicKey(key.email)}>
-                                Копіювати public
-                            </button>
-                            <button type="button" class="btn-icon"
-                                onclick={() => exportPublicKey(key.email)}>
-                                Експорт public
-                            </button>
-                            <button type="button" class="btn-icon" style="border-color: #fbcfe8; color: #db2777;" onclick={() => openExportPrivModal(key.email)}>
-                                Експорт private
-                            </button>
-                            <button type="button" class="btn-delete"
-                                onclick={() => startDelete('key', key.email)}>
-                                Видалити
-                            </button>
+                                </p>
+                            </div>
+                            <div class="card-actions">
+                                <button type="button" class="btn-icon"
+                                    onclick={() => copyPublicKey(key.email)}>
+                                    Копіювати public
+                                </button>
+                                <button type="button" class="btn-icon"
+                                    onclick={() => exportPublicKey(key.email)}>
+                                    Експорт public
+                                </button>
+                                <button type="button" class="btn-icon" style="border-color: #fbcfe8; color: #db2777;" onclick={() => openExportPrivModal(key.email)}>
+                                    Експорт private
+                                </button>
+                                <button type="button" class="btn-delete"
+                                    onclick={() => startDelete('key', key.email)}>
+                                    Видалити
+                                </button>
+                            </div>
                         </div>
                     </div>
+                    {/each}
                 </div>
-                {/each}
-            </div>
-            {/if}
-
-            {:else}
-            <div class="panel-header">
-                <div class="panel-title">
-                    <h2>Публічні ключі контактів</h2>
-                    <p>Додавайте public key ваших кореспондентів, щоб шифрувати листи до них.</p>
-                </div>
-                <div class="panel-actions">
-                    <button type="button" onclick={() => isContactModalOpen = true} class="btn btn-primary">
-                        + Додати контакт
-                    </button>
-                </div>
-            </div>
-
-            <div class="search-bar">
-                <span class="search-icon">🔍</span>
-                <input type="text" bind:value={contactSearchQuery}
-                    placeholder="Пошук за email..." />
-                {#if contactSearchQuery}
-                <button type="button" class="clear-search"
-                    onclick={() => contactSearchQuery = ''}>✕</button>
                 {/if}
-            </div>
 
-            {#if filteredContacts.length === 0}
-            <div class="empty-state">
-                <div class="empty-icon">📁</div>
-                <h3>{contactSearchQuery ? 'Нічого не знайдено' : 'Контактів немає'}</h3>
-                <p>Додайте перший публічний ключ, щоб шифрувати листи.</p>
-            </div>
-            {:else}
-            <div class="list-container">
-                {#each filteredContacts as c (c.fingerprint)}
-                <div class="card">
-                    <div class="card-content">
-                        <div class="card-info">
-                            <div class="card-title-row">
-                                <h3>{c.email}</h3>
-                                {#if c.verified}<span class="tag tag-green">✓ verified</span>{/if}
-                                <span class="tag tag-gray">{formatDate(c.createdAt)}</span>
-                            </div>
-                            <p class="card-fingerprint {revealedFingerprints.has(c.fingerprint) ? '' : 'blurred'}"
+                {:else}
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <h2>Ключі контактів</h2>
+                        <p>Додавайте відкриті (public) ключі людей з якими ви контактуєте, щоб шифрувати листи для них.</p>
+                    </div>
+                    <div class="panel-actions">
+                        <button type="button" onclick={() => isContactModalOpen = true} class="btn btn-primary">
+                            + Додати контакт
+                        </button>
+                    </div>
+                </div>
+
+                <div class="search-bar">
+                    <span class="search-icon">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                    </span>
+                    <input type="text" bind:value={contactSearchQuery}
+                        placeholder="Пошук за email..." />
+                    {#if contactSearchQuery}
+                    <button type="button" class="clear-search"
+                        onclick={() => contactSearchQuery = ''}>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                    {/if}
+                </div>
+
+                {#if filteredContacts.length === 0}
+                <div class="empty-state">
+                    <div class="empty-icon">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/></svg>
+                    </div>
+                    <h3>{contactSearchQuery ? 'Нічого не знайдено' : 'Контактів немає'}</h3>
+                    <p>Додайте перший відкритий ключ, щоб шифрувати листи.</p>
+                </div>
+                {:else}
+                <div class="list-container">
+                    {#each filteredContacts as c (c.fingerprint)}
+                    <div class="card">
+                        <div class="card-content">
+                            <div class="card-info">
+                                <div class="card-title-row">
+                                    <h3>{c.email}</h3>
+                                    {#if c.verified}<span class="tag tag-green">✓ verified</span>{/if}
+                                    <span class="tag tag-gray">{formatDate(c.createdAt)}</span>
+                                </div>
+                                <p class="card-fingerprint {revealedFingerprints.has(c.fingerprint) ? '' : 'blurred'}"
                                 title={revealedFingerprints.has(c.fingerprint) ? "Відбиток" : "Натисніть, щоб показати відбиток"}
-                                onclick={() => toggleFingerprint(c.fingerprint)}
+                                onclick={() => revealFingerprint(c.fingerprint)}
                                 onmouseleave={() => hideFingerprint(c.fingerprint)}
                                 role="presentation">
                                 {formatFingerprint(c.fingerprint)}
                             </p>
-                        </div>
-                        <div class="card-actions">
-                            <button type="button" class="btn-icon"
-                                onclick={() => copyPublicKey(c.email)}>
-                                Копіювати public
-                            </button>
-                            <button type="button" class="btn-icon"
-                                onclick={() => exportPublicKey(c.email)}>
-                                Експорт public
-                            </button>
-                            <button type="button" class="btn-delete"
-                                onclick={() => startDelete('contact', c.email)}>
-                                Видалити
-                            </button>
+                            </div>
+                            <div class="card-actions">
+                                <button type="button" class="btn-icon"
+                                    onclick={() => copyPublicKey(c.email)}>
+                                    Копіювати public
+                                </button>
+                                <button type="button" class="btn-icon"
+                                    onclick={() => exportPublicKey(c.email)}>
+                                    Експорт public
+                                </button>
+                                <button type="button" class="btn-delete"
+                                    onclick={() => startDelete('contact', c.email)}>
+                                    Видалити
+                                </button>
+                            </div>
                         </div>
                     </div>
+                    {/each}
                 </div>
-                {/each}
-            </div>
-            {/if}
-            {/if}
-        </section>
-    </main>
+                {/if}
+                {/if}
+            </section>
+        </div>
+    </div>
+</div>
 </div>
 
 {#if isGenModalOpen || isImportModalOpen || isContactModalOpen || isConfirmDeleteOpen || isExportPrivModalOpen}
@@ -540,7 +567,7 @@ const copyPublicKey = async (email: string) => {
 <div class="modal">
     <h2>Генерація PGP-ключа</h2>
     <p class="modal-desc">
-        Буде створено v6-ключ (Curve25519) та зашифровано майстер-паролем вашого сховища.
+        Буде створено v6-ключ (Curve25519) та зашифровано паролем вашого сховища.
     </p>
     <form onsubmit={(e) => { e.preventDefault(); handleGenerateKey(); }}>
         <div class="form-group">
@@ -572,7 +599,7 @@ const copyPublicKey = async (email: string) => {
 
 {#if isContactModalOpen}
 <div class="modal modal-large">
-    <h2>Додати публічний ключ контакта</h2>
+    <h2>Додати відкритий ключ контакта</h2>
     <form onsubmit={(e) => { e.preventDefault(); handleAddContact(); }}>
         <div class="form-group">
             <label for="c-email">Email контакта</label>
@@ -610,14 +637,14 @@ const copyPublicKey = async (email: string) => {
 
 {#if isExportPrivModalOpen}
 <div class="modal modal-small">
-    <h2>Безпечний експорт ключа</h2>
+    <h2>Експорт закритого ключа</h2>
     <p class="modal-desc" style="color: #ef4444; font-weight: 500;">
-        Увага! Ви експортуєте ПРИВАТНИЙ КЛЮЧ для <strong>{exportPrivEmail}</strong>. Нікому не передавайте цей файл!
+        Увага! Ви експортуєте ЗАКРИТИЙ КЛЮЧ <strong>{exportPrivEmail}</strong>. Нікому не передавайте цей файл!
     </p>
     <form onsubmit={(e) => { e.preventDefault(); handleExportPrivateKeySubmit(); }}>
         <div class="form-group">
-            <label for="xp-password">Підтвердіть ваш майстер-пароль</label>
-            <input id="xp-password" type="password" bind:value={exportPrivPassword} placeholder="Введіть майстер-пароль сховища" required />
+            <label for="xp-password">Підтвердіть пароль</label>
+            <input id="xp-password" type="password" bind:value={exportPrivPassword} placeholder="Пароль сховища" required />
         </div>
 
         {#if exportPrivError}
@@ -641,27 +668,49 @@ const copyPublicKey = async (email: string) => {
 :global(body) {
     margin: 0;
     padding: 0;
-    background-color: #f1f5f9;
+    background-color: #e2e8f0;
     font-family: system-ui, sans-serif;
     color: #1e293b;
+    height: 100vh;
 }
 
-.app-container {
+.page-wrapper {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    padding: 40px;
+    box-sizing: border-box;
+}
+
+.settings-box {
+    background: #fff;
+    width: 100%;
+    max-width: 1100px;
+    height: 85vh;
+    min-height: 600px;
+    border-radius: 24px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.15);
     display: flex;
     flex-direction: column;
-    min-height: 100vh;
+    overflow: hidden;
+    border: 1px solid #cbd5e1;
 }
 
-.app-header {
-    background: #fff;
-    border-bottom: 1px solid #e2e8f0;
-    padding: 16px 40px;
+.box-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    position: sticky;
-    top: 0;
+    padding: 24px 40px;
+    border-bottom: 1px solid #e2e8f0;
+    background: #fff;
     z-index: 10;
+}
+
+.box-body {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
 }
 
 .header-brand {
@@ -670,55 +719,28 @@ const copyPublicKey = async (email: string) => {
     gap: 16px;
 }
 
-.logo-img {
-    width: 48px;
-    height: 48px;
-}
-
-.header-titles h1 {
-    margin: 0;
-    font-size: 24px;
-}
-
-.header-titles p {
-    margin: 0;
-    font-size: 14px;
-    color: #64748b;
-}
+.logo-img { width: 48px; height: 48px; }
+.header-titles h1 { margin: 0; font-size: 24px; }
+.header-titles p { margin: 0; font-size: 14px; color: #64748b; }
 
 .status-badge {
-    font-size: 13px;
+    font-size: 16px;
     font-weight: 600;
     padding: 6px 12px;
     border-radius: 20px;
 }
-
-.status-badge.unlocked {
-    background: #ecfdf5;
-    color: #059669;
-}
-
-.status-badge.locked {
-    background: #fef2f2;
-    color: #dc2626;
-}
-
-.app-layout {
-    display: flex;
-    flex: 1;
-    max-width: 1300px;
-    margin: 0 auto;
-    padding: 32px 40px;
-    gap: 40px;
-    width: 100%;
-    box-sizing: border-box;
-}
+.status-badge.unlocked { background: #ecfdf5; color: #059669; }
+.status-badge.locked { background: #fef2f2; color: #dc2626; }
 
 .sidebar {
     width: 280px;
+    background: #f8fafc;
+    border-right: 1px solid #e2e8f0;
+    padding: 32px 24px;
     display: flex;
     flex-direction: column;
     gap: 12px;
+    overflow-y: auto;
 }
 
 .nav-item {
@@ -736,19 +758,19 @@ const copyPublicKey = async (email: string) => {
     text-align: left;
 }
 
-.nav-item:hover {
-    background: #e2e8f0;
-}
-
-.nav-item.active {
-    background: #2563eb;
-    color: #fff;
-}
+.nav-item:hover { background: #e2e8f0; }
+.nav-item.active { background: #2563eb; color: #fff; }
 
 .nav-label {
     display: flex;
     align-items: center;
     gap: 12px;
+}
+
+.nav-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .badge {
@@ -759,7 +781,6 @@ const copyPublicKey = async (email: string) => {
     font-size: 13px;
     font-weight: 600;
 }
-
 .nav-item.active .badge {
     background: rgba(255, 255, 255, 0.2);
     color: #fff;
@@ -770,26 +791,17 @@ const copyPublicKey = async (email: string) => {
     background: #e2e8f0;
     padding: 20px;
     border-radius: 16px;
-    font-size: 13px;
+    font-size: 14px;
     color: #475569;
 }
-
-.info-panel h4 {
-    margin: 0 0 12px;
-    text-transform: uppercase;
-    font-size: 12px;
-}
-
-.info-panel p {
-    margin: 0 0 8px;
-}
+.info-panel h4 { margin: 0 0 12px; text-transform: uppercase; font-size: 14px; }
+.info-panel p { margin: 0 0 8px; }
 
 .main-panel {
     flex: 1;
     background: #fff;
-    border-radius: 24px;
     padding: 40px;
-    border: 1px solid #e2e8f0;
+    overflow-y: auto;
 }
 
 .panel-header {
@@ -799,6 +811,10 @@ const copyPublicKey = async (email: string) => {
     border-bottom: 1px solid #f1f5f9;
     padding-bottom: 24px;
     margin-bottom: 24px;
+}
+
+.panel-title {
+    margin-right: 32px;
 }
 
 .panel-header h2 {
@@ -815,6 +831,11 @@ const copyPublicKey = async (email: string) => {
 .panel-actions {
     display: flex;
     gap: 12px;
+}
+
+.panel-actions .btn {
+    min-width: 220px;
+    text-align: center;
 }
 
 .btn {
@@ -862,6 +883,8 @@ const copyPublicKey = async (email: string) => {
     top: 50%;
     transform: translateY(-50%);
     color: #94a3b8;
+    display: flex;
+    align-items: center;
 }
 
 .search-bar input {
@@ -885,17 +908,30 @@ const copyPublicKey = async (email: string) => {
     width: 24px;
     height: 24px;
     cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #475569;
+}
+
+.clear-search:hover {
+    background: #cbd5e1;
+    color: #1e293b;
 }
 
 .empty-state {
+    font-size: 16px;
     text-align: center;
     padding: 60px 20px;
     color: #64748b;
 }
 
 .empty-icon {
-    font-size: 64px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
     margin-bottom: 20px;
+    color: #64748b;
     opacity: 0.5;
 }
 
@@ -1046,11 +1082,11 @@ const copyPublicKey = async (email: string) => {
 }
 
 .modal-small {
-    max-width: 400px;
+    max-width: 500px;
 }
 
 .modal h2 {
-    margin: 0 0 10px;
+    margin: 0 0 25px;
     font-size: 26px;
 }
 
@@ -1068,7 +1104,7 @@ const copyPublicKey = async (email: string) => {
 }
 
 .form-group label {
-    font-size: 15px;
+    font-size: 16px;
     font-weight: 600;
     color: #334155;
 }
@@ -1106,6 +1142,7 @@ const copyPublicKey = async (email: string) => {
 }
 
 .toast {
+    font-size: 14px;
     position: fixed;
     bottom: 30px;
     right: 30px;
@@ -1119,8 +1156,14 @@ const copyPublicKey = async (email: string) => {
     z-index: 100;
 }
 
+.toast-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
 .toast-success {
-    border-left: 6px solid #10b981;
+    border-left: 8px solid #10b981;
 }
 
 .toast-error {
